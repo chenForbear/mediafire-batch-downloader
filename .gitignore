@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# Python 运行产物
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+
+# 打包 / 安装产物
+build/
+build-temp/          # packaging\build.bat 的 --workpath
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+MANIFEST
+*.manifest
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# 测试与工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# PyInstaller
+#   只忽略自动生成的 spec；build.spec 是本项目手写的打包配置，必须入库。
+# ---------------------------------------------------------------------------
+*.spec
+!build.spec
+
+# ---------------------------------------------------------------------------
+# 本机构建环境（便携 Python 3.8 + 离线 wheel，体积大且可重建，不入库）
+# ---------------------------------------------------------------------------
+build-env/
+
+# ---------------------------------------------------------------------------
+# 下载产物与本机调试残留
+# ---------------------------------------------------------------------------
+MediaFireDownloads/
+downloads/
+*.part
+*.part.tmp
+.mfd_hist_*
+
+# 自检/调试期间的数据目录与临时解压目录（程序正常运行不会在工作区里造这些）
+.testdata/
+.runtmp/
+
+# 交付物目录：exe 与源码 zip 属于构建产物，走 GitHub Releases，不入库
+dist-package/
+
+# 打包日志（每次构建都会重新生成）
+packaging/build-log.txt
+
+# 界面截图的早期尝试：PrintWindow 抓不到 Tk 自绘控件，产物是伪影，不作为素材入库
+docs/screenshots/
+tools/capture_ui.py
+
+# 打包调试副本（build-debug.spec 生成）
+dist-dbg/
+build-temp-dbg/
+
+# 定位启动问题时留下的分步探针与日志
+step_check*.py
+step*.log
+step*.err.txt
+step*.out.txt
+selftest.err.txt
+mfd-probe-*/
+mfd-save-*/
+
+# ---------------------------------------------------------------------------
+# 编辑器 / 系统
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store

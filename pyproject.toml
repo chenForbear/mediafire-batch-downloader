@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mediafire-batch-downloader"
+version = "2.0.0"
+description = "MediaFire 文件夹批量解析与下载工具：失败清单、断点续传、SHA-256 校验、兼容性诊断报告"
+readme = { file = "README.zh-CN.md", content-type = "text/markdown" }
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "MediaFire Batch Downloader contributors" }]
+keywords = ["mediafire", "downloader", "batch-download", "tkinter", "windows"]
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Chinese (Simplified)",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: File Transfer Protocol (FTP)",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/chenForbear/mediafire-batch-downloader"
+Source = "https://github.com/chenForbear/mediafire-batch-downloader"
+Issues = "https://github.com/chenForbear/mediafire-batch-downloader/issues"
+Changelog = "https://github.com/chenForbear/mediafire-batch-downloader/blob/main/CHANGELOG.md"
+
+# 只打包两个包：内核 mfd 与界面 mfd.ui。界面代码全部在 mfd/ui/ 内，
+# 内核任何模块都不 import tkinter，因此可以只 import mfd.mediafire 做无界面调用。
+[tool.setuptools]
+packages = ["mfd", "mfd.ui"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+# 界面主题 / 图标等静态资源若存在需要随包分发；当前项目不依赖任何数据文件。
+"mfd.ui" = []
+
+# 本项目不提供命令行入口：入口是双击运行的 run.pyw（pythonw，无控制台），
+# 不属于 console_scripts 的形态，故此处不声明 [project.scripts]。
