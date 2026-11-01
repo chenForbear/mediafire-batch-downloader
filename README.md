@@ -81,17 +81,27 @@ This tool does that whole loop in one pass:
 
 ## Getting started
 
-### Option 1: grab the exe (just want to use it)
+### Option 1: grab the portable package (recommended)
 
-1. Download `MediaFire批量下载器2.0.exe` from [Releases](https://github.com/CHEN-CHEN/mediafire-batch-downloader/releases);
-2. Double-click. Single file, no installer, no Python, nothing written outside your user profile;
-3. If your security software flags it on first run, allow it. Unsigned PyInstaller binaries get flagged once almost everywhere — it is a packaging artefact, not a property of this program;
-4. On Windows 7, read the Win7 section of [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) first (SP1 and the TLS 1.2 update are hard requirements).
+1. Download `MediaFire-Downloader-2.0.1-portable-win64.zip` from [Releases](https://github.com/chenForbear/mediafire-batch-downloader/releases);
+2. **Extract the whole archive first** — do not run anything from inside the zip viewer;
+3. Double-click `首次使用-双击我.bat` in the extracted folder. It clears the "downloaded from the internet" mark on these files, creates a desktop shortcut, and launches the app. **One time only**;
+4. From then on, use the desktop shortcut. No administrator rights, no Python.
+
+> **About "Windows protected your PC"**: that is SmartScreen's default reaction to *any* unsigned binary — every independently built exe gets stopped once on first download. Step 3 removes the mark, so it will not appear again afterwards. If it still does, click "More info" → "Run anyway"; that is a one-off.
+>
+> **Why the single-file build is no longer the default**: onefile builds unpack themselves into `%TEMP%\_MEIxxxx` on every launch. When `%TEMP%` is not writable, is restricted by group policy, or is blocked by security software, double-clicking fails outright — while "Run as administrator" happens to succeed because it runs at a different integrity level, which makes it *look* like the program needs admin rights. The onedir build unpacks nothing, never touches `%TEMP%`, and starts far faster.
+>
+> On Windows 7, read the Win7 section of [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) first (SP1 and the UCRT update KB2999226 are hard requirements).
+
+### Option 1b: single-file exe
+
+Releases also ship `MediaFire-Downloader-2.0.1-windows-x64.exe`. One file, drop it anywhere — but it self-extracts on every launch (a few seconds slower) and needs a writable `%TEMP%`. Use it only when "one file on a USB stick" really matters.
 
 ### Option 2: run from source
 
 ```powershell
-git clone https://github.com/CHEN-CHEN/mediafire-batch-downloader.git
+git clone https://github.com/chenForbear/mediafire-batch-downloader.git
 cd mediafire-batch-downloader
 python run.pyw
 ```

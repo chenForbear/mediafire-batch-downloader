@@ -145,20 +145,25 @@ a.binaries = _trim_packaged_runtime(a.binaries)
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
+# ── 两种打包形态 ──────────────────────────────────────────────────────────
+# 单文件（onefile，默认）：只有一个 exe，双击即用，但每次启动都要把自身
+#   解压到 %TEMP%\_MEIxxxx。代价有三个，都会真实咬人：
+#     1. 启动慢（9.8 MB 解压，机械盘上 3~6 秒）；
+#     2. %TEMP% 不可写 / 被组策略限制 / 被安全软件拦住时，双击直接报错——
+#        而"以管理员身份运行"恰好因为换了完整性级别而能过，于是用户会误以为
+#        这程序需要管理员权限；
+#     3. 每启动一次就在 %TEMP% 留一份副本，磁盘上多出几十 MB 垃圾。
+# 目录版（onedir，MFD_ONEDIR=1）：一个文件夹，启动不解压，0.3~0.8 秒起来，
+#   不碰 %TEMP%，也没有"管理员才跑得动"的怪现象。分发时压成 zip 即可。
+ONEDIR = os.environ.get("MFD_ONEDIR", "") == "1"
+
+_COMMON = dict(
     name=APP_EXE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,              # 不用 UPX：压过的 exe 更容易被杀软误报，Win7 上还常报错
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,          # 纯界面程序，双击不弹黑框
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -168,3 +173,34 @@ exe = EXE(
     icon=ICON if os.path.isfile(ICON) else None,
     version=VERSION_FILE if os.path.isfile(VERSION_FILE) else None,
 )
+
+if ONEDIR:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        runtime_tmpdir=None,
+        **_COMMON
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name=APP_EXE_NAME,
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        runtime_tmpdir=None,
+        **_COMMON
+    )

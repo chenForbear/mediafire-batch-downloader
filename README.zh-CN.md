@@ -14,7 +14,7 @@
 
 | | |
 |---|---|
-| 当前版本 | `2.0.0`（2026-11-01） |
+| 当前版本 | `2.0.1`（2026-11-01） |
 | 运行平台 | Windows 7 SP1 / 8.1 / 10 / 11 |
 | 运行环境 | Python 3.8+（打好的 exe 不需要装 Python） |
 | 第三方依赖 | **无**。除界面层用 Tkinter 外，全部标准库 |
@@ -81,17 +81,27 @@ MediaFire 的分享页一次只给你点一个文件。一个文件夹里躺着�
 
 ## 快速开始
 
-### 方式一：下载 exe（只想用，不想装环境）
+### 方式一：下载便携包（推荐）
 
-1. 打开 [Releases](https://github.com/CHEN-CHEN/mediafire-batch-downloader/releases) 下载 `MediaFire批量下载器2.0.exe`；
-2. 双击运行。单文件、免安装、不需要装 Python、不写系统目录；
-3. 首次运行如果被安全软件拦下，加进信任即可（PyInstaller 打包的无签名程序几乎都会被这么拦一次，这是通病，不是这个程序特有的）；
-4. Windows 7 用户先看一眼 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) 里的 Win7 段（SP1 与 TLS 1.2 补丁是硬要求）。
+1. 打开 [Releases](https://github.com/chenForbear/mediafire-batch-downloader/releases) 下载 `MediaFire-Downloader-2.0.1-portable-win64.zip`；
+2. **把压缩包整个解压出来**（不要直接在压缩包里双击运行）；
+3. 双击解压目录里的 `首次使用-双击我.bat`——它会解除这些文件「来自网络」的锁定标记、在桌面建一个快捷方式、并启动程序。**只跑这一次**；
+4. 之后双击桌面快捷方式即可。不需要管理员权限，不需要装 Python。
+
+> **关于「Windows 已保护你的电脑」**：这是 SmartScreen 对**所有没有数字签名的程序**的默认动作，不是这个程序有什么问题——任何个人开发者做的 exe，第一次下载都会被拦一次。跑过第 3 步之后就不会再弹；万一还看到，点「更多信息」→「仍要运行」，仅此一次。
+>
+> **为什么不再默认发单文件版**：单文件版每次启动都要把自身解压到 `%TEMP%\_MEIxxxx`。`%TEMP%` 不可写、被组策略限制、或被安全软件拦住时，双击会直接失败；而「以管理员身份运行」因为换了完整性级别恰好能过，于是看起来像是「这程序需要管理员权限」。目录版不解压、不碰 `%TEMP%`，启动也快得多。
+>
+> Windows 7 用户先看一眼 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) 里的 Win7 段（SP1 与 UCRT 补丁 KB2999226 是硬要求）。
+
+### 方式一·备选：单文件 exe
+
+Releases 里同时提供 `MediaFire-Downloader-2.0.1-windows-x64.exe`。一个文件、拷到哪都能放，但每次启动都要自解压（慢几秒），且依赖 `%TEMP%` 可写。只有「只想往 U 盘拷一个文件」这种场景才建议用它。
 
 ### 方式二：源码运行（想看代码、想改）
 
 ```powershell
-git clone https://github.com/CHEN-CHEN/mediafire-batch-downloader.git
+git clone https://github.com/chenForbear/mediafire-batch-downloader.git
 cd mediafire-batch-downloader
 python run.pyw
 ```
@@ -349,13 +359,21 @@ build.bat
 python -m PyInstaller --clean --noconfirm --distpath "..\dist" --workpath "..\build-temp" build.spec
 ```
 
-产物是 `..\dist\MediaFire批量下载器2.0.exe`，单文件。
+产物默认是**单文件** `..\dist\MediaFire批量下载器2.0.exe`。想要**目录版**（启动不解压、不碰 `%TEMP%`，也就是正式发布用的形态），先设一个环境变量：
 
-`build.spec` 里有三件事值得知道，都是踩过坑才写进去的：
+```powershell
+$env:MFD_ONEDIR = "1"
+python -m PyInstaller --clean --noconfirm --distpath "..\dist-dir" --workpath "..\build-temp-dir" build.spec
+```
+
+产物是 `..\dist-dir\MediaFire批量下载器2.0\` 一整个目录；分发时把 `setup.ps1` 与 `首次使用-双击我.bat` 放进去、再压成 zip 即可。
+
+`build.spec` 里有四件事值得知道，都是踩过坑才写进去的：
 
 1. **必须用 Python 3.8 打包**才有机会在 Win7 上跑（参见 PyInstaller issue #6621）；
-2. **Tk 数据目录要一起带**：把 `tcl8.6` / `tk8.6` 打到 exe 内部的 `tcl/tcl8.6`、`tcl/tk8.6` 位置，否则 Win7 上界面直接起不来；
-3. **要剔除打包机自带的 UCRT**：`ucrtbase.dll` 与 `api-ms-win-core-*` 转发 DLL 会被打进去，但它们在 Win7 上版本不匹配，缺 `api-ms-win-crt-*` 就会启动失败——所以打包时删前者、留后者。
+2. **Tk 数据目录要一起带**：把 `tcl8.6` / `tk8.6` 打到包内的 `tcl/tcl8.6`、`tcl/tk8.6` 位置，否则 Win7 上界面直接起不来；
+3. **要剔除打包机自带的 UCRT**：`ucrtbase.dll` 与 `api-ms-win-core-*` 转发 DLL 会被打进去，但它们在 Win7 上版本不匹配，缺 `api-ms-win-crt-*` 就会启动失败——所以打包时删前者、留后者；
+4. **两种形态只差一个环境变量**：`MFD_ONEDIR=1` 走 `EXE(..., exclude_binaries=True)` + `COLLECT(...)`；不设则走单文件 `EXE(...)`。单文件每次启动都要把自身解压到 `%TEMP%\_MEIxxxx`，`%TEMP%` 不可写或被拦时双击直接失败——这正是目录版成为默认发布形态的原因。
 
 完整矩阵与逐条处置见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
 

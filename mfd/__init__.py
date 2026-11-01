@@ -14,13 +14,13 @@
 除界面外全部模块只依赖 Python 标准库，Windows 7 SP1 + Python 3.8 即可运行。
 """
 
-__version__ = "2.0.0"
-__version_info__ = (2, 0, 0, 0)
+__version__ = "2.0.1"
+__version_info__ = (2, 0, 1, 0)
 
 APP_NAME = "MediaFire 批量下载器"
 APP_ID = "MediaFireDownloader2"
 APP_TAGLINE = "批量解析 · 断点续传 · 失败清单"
-PROJECT_URL = "https://github.com/CHEN-CHEN/mediafire-batch-downloader"
+PROJECT_URL = "https://github.com/chenForbear/mediafire-batch-downloader"
 
 __all__ = [
     "__version__",

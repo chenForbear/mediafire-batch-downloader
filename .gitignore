@@ -93,3 +93,6 @@ mfd-save-*/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+dist-dir/
+build-temp-dir/
