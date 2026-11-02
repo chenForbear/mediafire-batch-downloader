@@ -49,10 +49,26 @@ class TestStartDoesNotFakeFinish(unittest.TestCase):
             downloader, events = _make_downloader(tmp)
             with mock.patch("mfd.downloader.probe_writable_dir",
                             return_value=(False, "文件夹是只读的")):
-                started = downloader.start()
+                with mock.patch("mfd.downloader.pick_writable_fallback", return_value=""):
+                    started = downloader.start()
             self.assertFalse(started)
             self.assertNotIn("finished", events)
             self.assertIn("保存目录无法写入", downloader.last_error)
+
+    def test_unwritable_dir_switches_to_fallback(self):
+        """原目录写不进时不能停摆，要自动换到能写的地方继续跑。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            downloader, _ = _make_downloader(tmp)
+            with tempfile.TemporaryDirectory() as alt:
+                with mock.patch("mfd.downloader.probe_writable_dir",
+                                return_value=(False, "文件夹是只读的")):
+                    with mock.patch("mfd.downloader.pick_writable_fallback", return_value=alt):
+                        with mock.patch.object(downloader, "_worker"):
+                            started = downloader.start()
+                self.assertTrue(started)
+                self.assertEqual(downloader.download_dir, alt)
+                self.assertEqual(downloader.last_error, "")
+                downloader.stop_and_wait(5.0)
 
 
 class TestSetDownloadDir(unittest.TestCase):

@@ -98,7 +98,9 @@ class TestStartRefusesUnwritableDir(unittest.TestCase):
             downloader = self._make_downloader(tmp)
             with mock.patch("mfd.downloader.probe_writable_dir",
                             return_value=(False, "没有写入权限")):
-                started = downloader.start()
+                # 连替代目录都找不到时才算真失败（能找到就会自动换目录继续跑）
+                with mock.patch("mfd.downloader.pick_writable_fallback", return_value=""):
+                    started = downloader.start()
             self.assertFalse(started)
             self.assertIn("保存目录无法写入", downloader.last_error)
             self.assertIn("没有写入权限", downloader.last_error)

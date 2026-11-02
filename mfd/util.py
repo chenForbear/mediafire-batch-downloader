@@ -242,3 +242,50 @@ def describe_write_error(path, exc):
 
     return "写入失败：%s" % exc
 
+
+def pick_writable_fallback(preferred=""):
+    """目录写不进去时，按顺序找一个真能写的位置，返回路径（找不到返回空串）。
+
+    为什么需要这个（2026-11-02 用户实测）：他填的目录明明在资源管理器里能
+    建文件，程序却报「没有写入权限」。这类"看起来正常却写不进去"的目录太多
+    ——ACL 只读、OneDrive 占位、杀软锁定、移动硬盘掉线、企业策略限制。与其
+    让整个下载停摆，不如换到确定能写的地方，并把"换了哪个、为什么换"明确
+    告诉用户；人自己会判断要不要再挪回去。
+
+    候选顺序：用户填的目录（再试一次）→ 家目录下 Downloads/Desktop/Documents
+    下的子目录 → 数据目录下的 Downloads。最后那个一定可写（程序本来就往那
+    里写失败清单）。
+    """
+    candidates = []
+    if preferred:
+        candidates.append(preferred)
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        for name in ("Downloads", "Desktop", "Documents"):
+            candidates.append(os.path.join(home, name, "MediaFireDownloads"))
+    try:
+        from . import paths
+        candidates.append(paths.data_file("Downloads"))
+    except Exception:
+        pass
+    try:
+        import tempfile
+        candidates.append(os.path.join(tempfile.gettempdir(), "MediaFireDownloads"))
+    except Exception:
+        pass
+
+    seen = set()
+    for candidate in candidates:
+        try:
+            key = os.path.normcase(os.path.abspath(candidate))
+        except Exception:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        ok, _ = probe_writable_dir(candidate)
+        if ok:
+            return candidate
+    return ""
+
+

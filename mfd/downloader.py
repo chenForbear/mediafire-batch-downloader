@@ -31,6 +31,7 @@ from .util import (
     fit_in_directory,
     human_size,
     human_time,
+    pick_writable_fallback,
     probe_writable_dir,
     sanitize_filename,
 )
@@ -322,15 +323,23 @@ class Downloader(object):
         self.last_error = ""
         writable, reason = probe_writable_dir(self.download_dir)
         if not writable:
-            self.last_error = "保存目录无法写入：%s\n%s" % (reason, self.download_dir)
-            self._log("保存目录无法写入：%s" % reason)
-            self._log("    目录：%s" % self.download_dir)
-            self._log("    请在界面上换一个文件夹再开始（例如 %s）"
-                      % os.path.join(os.path.expanduser("~"), "Downloads"))
             self._writable_cache[self.download_dir] = (False, reason)
-            # 同上：启动失败不发 finished，否则界面会弹"下载结束 完成 0"，
-            # 用户以为跑完了，其实是压根没跑。
-            return False
+            # 写不进去不要硬停。用户的目录可能因为 ACL、OneDrive 占位、杀软
+            # 锁定、移动硬盘掉线而"看起来正常却写不进"，这些他都没法一眼看出。
+            # 所以：换一个确定能写的地方继续跑，并明确告诉他换了哪、为什么换。
+            fallback = pick_writable_fallback()
+            if not fallback:
+                self.last_error = "保存目录无法写入：%s\n%s" % (reason, self.download_dir)
+                self._log("保存目录无法写入：%s" % reason)
+                self._log("    目录：%s" % self.download_dir)
+                self._log("    也没找到可替代的可写目录，请手动换一个文件夹再开始。")
+                return False
+            self._log("WARN 保存目录写不进去（%s）：%s" % (reason, self.download_dir))
+            self._log("    已自动改用：%s" % fallback)
+            self._log("    想换回自己的目录：在界面上改好后直接点「开始下载」。")
+            self.download_dir = fallback
+            writable = True
+
 
         self._stop_flag.clear()
         self._pause_flag.clear()

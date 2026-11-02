@@ -1744,6 +1744,19 @@ class App(object):
             self._set_status("启动下载失败，详情见日志", "danger")
             self._alert_start_failed("启动下载时出现意外错误。", detail)
             return
+        # 引擎可能因为原目录写不进去，自动换到了别的目录。输入框要跟着改，
+        # 否则用户看到的是"我填的路径"，文件却落在别处，又是一次迷惑。
+        try:
+            actual_dir = str(getattr(self.downloader, "download_dir", "") or "")
+        except Exception:
+            actual_dir = ""
+        if started and actual_dir and actual_dir != self._entry_text(self.dir_entry):
+            try:
+                self.dir_entry.delete(0, "end")
+                self.dir_entry.insert(0, actual_dir)
+            except Exception:
+                pass
+            self._set_status("原目录写不进去，已自动改存到 %s" % actual_dir, "warning")
         if not started:
             # 启动失败可能有很多原因（目录不可写最常见），引擎会把真正的
             # 那句原因放在 last_error 里，直接显示比"没有可下载的任务"有用
