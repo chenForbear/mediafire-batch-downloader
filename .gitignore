@@ -118,3 +118,10 @@ _*.png
 _*.log
 _*.txt
 !_*.md
+
+# 测试残留（Settings 隔离目录、临时下载目录）
+mfd_settings_*/
+tmp*/
+.testdata/
+_disc.*.txt
+_build.*.txt

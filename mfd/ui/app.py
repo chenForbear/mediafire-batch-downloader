@@ -15,12 +15,16 @@
 不会因为 import 失败而「双击没反应」。
 """
 
+import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
 import traceback
+import webbrowser
+import zipfile
 import tkinter as tk
 import tkinter.font as tkfont  # noqa: F401  （保持与 theme/widgets 一致的字体入口）
 from tkinter import filedialog
@@ -412,6 +416,429 @@ def load_kernel():
 
 
 # ----------------------------------------------------------------------
+# 二·五、界面自用的小工具（版本号比较、链接切分、设置读写适配层）
+# ----------------------------------------------------------------------
+
+#: 「全部下载完成后做什么」下拉框的取值（默认第一项，绝不默认关机）
+FINISH_ACTIONS = ("不做事", "打开文件夹", "关机")
+#: 队列状态筛选下拉框的取值（第一项表示不筛）
+STATUS_FILTERS = ("全部", "排队中", "下载中", "已完成", "失败", "已跳过")
+#: 中文筛选项 → 引擎里的状态码
+STATUS_FILTER_CODE = {
+    "排队中": "waiting",
+    "下载中": "running",
+    "已完成": "done",
+    "失败": "failed",
+    "已跳过": "skipped",
+}
+DIR_HISTORY_LIMIT = 8        # 保存位置历史最多记 8 条
+SEARCH_DEBOUNCE_MS = 150     # 搜索框防抖（契约：150ms）
+OPTIONS_DEBOUNCE_MS = 400    # 并发/间隔/限速改动后的应用延迟
+DEFAULT_THREADS = 2          # 并发数的兜底默认值
+DEFAULT_GAP = 1.0            # 间隔秒数的兜底默认值
+
+_GEOMETRY_RE = re.compile(r"^\d{2,5}x\d{2,5}([+-]{1,2}\d{1,5}[+-]{1,2}\d{1,5})?$")
+
+_BUNDLE_README = """MediaFire 批量下载器 —— 诊断包说明
+========================================
+
+本压缩包用于反馈问题，里面有四份文件：
+
+1. diagnostics.json
+   《诊断》页签里那份报告的结构化版本：系统版本、Python/Tk 版本、
+   DPI 与字体、代理设置、失败按类型与平台的交叉统计，以及程序自己
+   记下的事件流水。排查「为什么下不动」主要看这份。
+
+2. failures.json
+   《失败清单》页签的原始记录：每个失败文件的名字、链接、错误类型、
+   错误原因、尝试次数、发生时间。已经成功的文件不会出现在这里。
+
+3. app.log
+   本次运行界面日志区的全文（和你在《日志》页签里看到的一样），
+   按时间顺序，INFO / WARN / ERROR 混排。
+
+4. README.txt
+   就是你正在读的这一份。
+
+隐私提醒
+--------
+diagnostics.json 与 app.log 里可能包含你的下载目录路径、系统用户名、
+内网代理地址等本机信息。对外发送之前请自己过一眼，觉得敏感的段落
+可以直接删掉，不影响其余内容被看懂。
+"""
+
+
+def _version_tuple(text):
+    """把 ``2.1.3`` 这类版本号切成可比较的整数元组。"""
+    parts = []
+    for chunk in re.split(r"[^0-9]+", str(text or "")):
+        if chunk:
+            try:
+                parts.append(int(chunk))
+            except ValueError:
+                continue
+    return tuple(parts)
+
+
+def _version_newer(candidate, current):
+    """候选版本号是否比当前版本新（拿不到数字就当没有新版）。"""
+    new = _version_tuple(candidate)
+    old = _version_tuple(current)
+    if not new:
+        return False
+    return new > old
+
+
+def _parse_update_result(result, current):
+    """把 ``check_latest_version()`` 的返回值揉成 ``(有新版, 最新版本, 下载页)``。
+
+    更新模块由别人实现，返回形状未定：字典、二元组、纯版本号字符串都可能。
+    这里全部兼容，实在看不懂就抛 ``ValueError``，由调用方转成「检查更新失败」，
+    不让界面猜。
+    """
+    latest = ""
+    page = ""
+    explicit = None
+
+    if isinstance(result, dict):
+        # 现行 update.check_latest_version() 用 ok/error 表示「这次检查本身成不成功」。
+        # 检查失败时它不抛异常，只是把原因写进 error——这里要当成失败处理。
+        if result.get("ok") is False:
+            raise ValueError(str(result.get("error") or "检查更新失败").strip())
+        for key in ("latest", "latest_version", "new_version", "version",
+                    "tag_name", "tag"):
+            value = result.get(key)
+            if value:
+                latest = str(value).strip()
+                break
+        for key in ("url", "download_url", "page", "html_url",
+                    "release_url", "link", "href"):
+            value = result.get(key)
+            if value:
+                page = str(value).strip()
+                break
+        for key in ("newer", "has_new", "is_new", "update_available",
+                    "need_update", "outdated"):
+            if key in result:
+                explicit = bool(result[key])
+                break
+    elif isinstance(result, (tuple, list)):
+        values = list(result)
+        if len(values) >= 1 and values[0] is not None:
+            latest = str(values[0]).strip()
+        if len(values) >= 2 and values[1]:
+            page = str(values[1]).strip()
+        if len(values) >= 3 and isinstance(values[2], bool):
+            explicit = values[2]
+    elif isinstance(result, str):
+        latest = result.strip()
+    elif result is None:
+        raise ValueError("更新接口返回了 None")
+    else:
+        raise ValueError("更新接口返回了 %r" % (result,))
+
+    if explicit is None:
+        has_new = _version_newer(latest, current) if latest else False
+    else:
+        has_new = bool(explicit) and bool(latest or page)
+    return has_new, latest, page
+
+
+def _valid_geometry(text):
+    """这个几何字符串能不能直接交给 ``root.geometry()``。
+
+    除了格式合法，还要求尺寸像样：窗口在 ``withdraw()``、还没布局或者被
+    最小化的时候，``geometry()`` 会返回 ``1x1+0+0`` 这种值——照着恢复，
+    下次启动用户看到的就是一个一像素的窗口。
+    """
+    value = str(text or "").strip()
+    if not value or len(value) > 40:
+        return False
+    if not _GEOMETRY_RE.match(value):
+        return False
+    width, height = _geometry_size(value)
+    return width >= 600 and height >= 400
+
+
+def _geometry_size(text):
+    """从 ``800x600+10+20`` 里取出 ``(800, 600)``；解析不出来就是 ``(0, 0)``。"""
+    head = str(text or "").strip().split("+")[0].split("-")[0]
+    try:
+        width, height = head.split("x")
+        return int(width), int(height)
+    except (ValueError, AttributeError):
+        return (0, 0)
+
+
+def _split_links(raw):
+    """把多行文本切成链接列表：去空行、去首尾空格、按出现顺序去重。"""
+    links = []
+    seen = set()
+    for line in str(raw or "").splitlines():
+        text = line.strip().strip(",;，；、")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        links.append(text)
+    return links
+
+
+def _is_text_widget(widget):
+    """是不是 ``tk.Text``（链接输入框从 2.0.3 起换成了多行文本框）。"""
+    try:
+        return isinstance(widget, tk.Text)
+    except Exception:
+        return False
+
+
+def _load_settings_module():
+    """拿到 ``mfd.settings``；还没写出来就返回 None（整块功能静默跳过）。"""
+    try:
+        from .. import settings as settings_mod
+        return settings_mod
+    except Exception:
+        return None
+
+
+class _SettingsBridge(object):
+    """对 ``mfd.settings`` 的薄适配层。
+
+    为什么要有这一层：``settings.py`` 由别人并行实现，接口形状还没定死——
+    可能是 ``Settings()`` 对象带 ``get/set/save``，可能是模块级函数，也可能
+    直接就是属性。这里把三种形状都试一遍，任何一种失败就当「没有这项设置」，
+    绝不让界面因为读不到设置而打不开。
+    """
+
+    #: 界面会读写的全部键。启动时一次性读进内存缓存，之后读操作不再碰磁盘。
+    KEYS = ("theme", "window_geometry", "last_url", "download_dir",
+            "max_threads", "gap_seconds", "speed_limit_kbps", "finish_action",
+            "auto_folder", "include_subfolders", "autostart",
+            "download_dir_history")
+
+    def __init__(self, module=None):
+        self.module = module
+        self.store = None
+        self._cache = {}
+        self._jobs = queue.Queue()
+        self._writer = None
+        if module is None:
+            return
+        try:
+            factory = getattr(module, "Settings", None)
+            if callable(factory):
+                self.store = factory()
+        except Exception:
+            self.store = None
+        self._preload()
+        self._start_writer()
+
+    # -- 内存缓存读写 ----------------------------------------------------
+    def _preload(self):
+        """把已知键一次读进缓存。
+
+        **只在这里读盘**：之后 ``get()`` 全走内存。这样即使后台写盘卡在某个
+        坏掉的文件系统上（本机就遇到过），界面读设置也永远不会被拖住。
+        """
+        for key in self.KEYS:
+            value = None
+            try:
+                value = self._read_target(key, None)
+            except Exception:
+                value = None
+            if value is not None:
+                self._cache[key] = value
+
+    def _read_target(self, key, default=None):
+        """从真正的存储对象上读一项（可能加锁，只允许启动时调用）。"""
+        target = self._target()
+        try:
+            getter = getattr(target, "get", None)
+            if callable(getter):
+                value = getter(key, default)
+                if value is not None:
+                    return value
+        except Exception:
+            pass
+        try:
+            value = getattr(target, key)
+            if callable(value):
+                return default
+            return value
+        except Exception:
+            return default
+
+    # -- 后台写盘线程 ----------------------------------------------------
+    def _start_writer(self):
+        if self._writer is not None:
+            return
+        try:
+            self._writer = threading.Thread(target=self._write_loop,
+                                            name="mfd-settings", daemon=True)
+            self._writer.start()
+        except Exception:
+            self._writer = None
+
+    def _write_loop(self):
+        """守护线程：把设置写进磁盘。
+
+        做成后台线程的唯一理由是**防卡死**——本机实测有个目录里建文件会直接
+        挂住，写在界面线程里就是整个窗口假死。这里挂住也只挂这一条线程。
+        """
+        while True:
+            try:
+                job = self._jobs.get()
+            except Exception:
+                return
+            try:
+                kind = job[0]
+                if kind == "set":
+                    self._write_set(job[1], job[2])
+                elif kind == "history":
+                    self._write_set("download_dir_history", job[1])
+                    self._write_save()
+                elif kind == "save":
+                    self._write_save()
+            except Exception:
+                pass
+
+    def _write_set(self, key, value):
+        target = self._target()
+        setter = getattr(target, "set", None)
+        if callable(setter):
+            try:
+                setter(key, value, save=False)
+                return True
+            except TypeError:
+                pass
+            except Exception:
+                return False
+            try:
+                setter(key, value)
+                return True
+            except Exception:
+                return False
+        updater = getattr(target, "update", None)
+        if callable(updater):
+            try:
+                updater({key: value})
+                return True
+            except Exception:
+                pass
+        try:
+            setattr(target, key, value)
+            return True
+        except Exception:
+            return False
+
+    def _write_save(self):
+        if self.store is not None:
+            saver = getattr(self.store, "save", None)
+            if callable(saver):
+                try:
+                    saver()
+                    return True
+                except Exception:
+                    pass
+        saver = getattr(self.module, "save", None) if self.module else None
+        if callable(saver):
+            try:
+                saver()
+                return True
+            except Exception:
+                pass
+        return False
+
+    # -- 基础读写 --------------------------------------------------------
+    def _target(self):
+        """真正承载键值的东西：优先 Settings 实例，否则退回模块本身。"""
+        return self.store if self.store is not None else self.module
+
+    def get(self, key, default=None):
+        """读一项设置——**只读内存缓存，不碰磁盘**，因此永远不会卡界面。"""
+        if self.module is None:
+            return default
+        value = self._cache.get(key, None)
+        return default if value is None else value
+
+    def set(self, key, value):
+        """写一项设置：立刻更新缓存，写盘丢给后台线程。"""
+        if self.module is None:
+            return False
+        self._cache[key] = value
+        try:
+            self._jobs.put(("set", key, value))
+        except Exception:
+            return False
+        return True
+
+    def save(self):
+        """请求落盘；真正写盘在后台线程里做。"""
+        if self.module is None:
+            return False
+        try:
+            self._jobs.put(("save",))
+        except Exception:
+            return False
+        return True
+
+    def flush(self, timeout=0.3):
+        """退出前尽力等一会儿写盘线程，最多 ``timeout`` 秒。
+
+        写不动（坏盘、被杀软锁住）也只放弃等待——关窗不能因为存设置而卡住。
+        """
+        self.save()
+        writer = self._writer
+        if writer is None:
+            return False
+        try:
+            writer.join(timeout)
+        except Exception:
+            return False
+        return not writer.is_alive()
+
+    # -- 保存位置历史 ----------------------------------------------------
+    def history(self, limit=DIR_HISTORY_LIMIT):
+        """读目录历史（永远是字符串列表，最多 ``limit`` 条）。"""
+        try:
+            raw = self.get("download_dir_history", [])
+        except Exception:
+            raw = []
+        if isinstance(raw, str):
+            raw = [part for part in raw.splitlines()]
+        values = []
+        try:
+            for item in list(raw or []):
+                text = str(item or "").strip()
+                if text and text not in values:
+                    values.append(text)
+                if len(values) >= limit:
+                    break
+        except Exception:
+            return []
+        return values
+
+    def push_dir(self, path, limit=DIR_HISTORY_LIMIT):
+        """把一次实际用到的目录记进历史最前面，立刻返回最新的历史列表。
+
+        去重、置顶、截断都在内存里算完；写盘交给后台线程，界面不用等。
+        """
+        text = str(path or "").strip()
+        if not text:
+            return self.history(limit)
+        values = [item for item in self.history(limit) if item != text]
+        values.insert(0, text)
+        values = values[:limit]
+        if self.module is None:
+            return values
+        self._cache["download_dir_history"] = values
+        try:
+            self._jobs.put(("history", values))
+        except Exception:
+            pass
+        return values
+
+
+# ----------------------------------------------------------------------
 # 三、App
 # ----------------------------------------------------------------------
 
@@ -429,6 +856,9 @@ class App(object):
         theme.set_dpi_awareness()
         self.palette, self.fonts = theme.apply_style(root, theme.mode())
         theme.apply_dpi_scaling(root)
+
+        # 设置桥（mfd.settings 可能还没写出来：拿不到就整块静默跳过）
+        self.settings_bridge = _SettingsBridge(_load_settings_module())
 
         # 事件与定时器
         self._queue = queue.Queue()
@@ -454,9 +884,19 @@ class App(object):
         self._background = False
         self._log_lines = 0
 
+        # 2.0.3 新增的运行态
+        self._last_url = ""          # 最近一次解析用的链接（建子目录名时要用）
+        self._filter_job = None      # 搜索防抖的 after id
+        self._options_job = None     # 并发/间隔/限速防抖的 after id
+        self._update_checking = False
+        self._typing_urls = []       # 最近一次送进解析线程的链接列表
+        self._last_options = None    # 上一次已写进引擎的 (并发, 间隔, 限速)
+
         self._build_window()
         self._build_ui()
         self._bind_shortcuts()
+        # 恢复上次的窗口几何、主题、链接与各项开关（任何一项失败都不影响启动）
+        self._restore_ui_state()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -642,6 +1082,14 @@ class App(object):
             pad_x=12, min_width=0))
         self.theme_btn.pack(side="right", pady=8)
 
+        # 检查更新：放在主题按钮左边（pack 顺序决定左右）
+        self.update_btn = self._register_tint(widgets.RoundedButton(
+            right, "检查更新", command=self._on_check_update,
+            kind="ghost", palette=palette, fonts=self.fonts, height=32,
+            pad_x=12, min_width=0,
+            tooltip="问一下服务器有没有新版本"))
+        self.update_btn.pack(side="right", padx=(0, 8), pady=8)
+
         # 内核缺模块时的提示胶囊（正常时创建但隐藏，免得布局跳动）
         self.kernel_pill = self._register_tint(widgets.Pill(
             right, "内核未就绪", palette=palette, fonts=self.fonts,
@@ -655,6 +1103,83 @@ class App(object):
         return "☀ 浅色" if theme.mode() == theme.MODE_DARK else "☾ 深色"
 
     # -- 2. 输入卡 -------------------------------------------------------
+    def _build_link_text(self, parent):
+        """多行链接输入框（替换掉 2.0.2 的单行 Entry）。
+
+        属性名仍然是 ``self.link_entry``：外部读内容走 ``_entry_text()``，
+        写内容走 ``_set_entry_text()``，等价于原来 Entry 的 ``get`` /
+        ``delete+insert`` 语义，别处代码不用跟着改。
+        """
+        text = tk.Text(parent, height=3, wrap="none", undo=True,
+                       font=self.fonts.body, relief="flat", borderwidth=0,
+                       highlightthickness=1, padx=10, pady=8, insertwidth=1)
+        text.configure(bg=self.palette["surface_alt"],
+                       fg=self.palette["text"],
+                       highlightbackground=self.palette["border"],
+                       highlightcolor=self.palette["accent"],
+                       insertbackground=self.palette["text"],
+                       selectbackground=self.palette["selection"],
+                       selectforeground=self.palette["text"])
+
+        def theme_job(palette):
+            try:
+                text.configure(bg=palette["surface_alt"],
+                               fg=palette["text"],
+                               highlightbackground=palette["border"],
+                               highlightcolor=palette["accent"],
+                               insertbackground=palette["text"],
+                               selectbackground=palette["selection"],
+                               selectforeground=palette["text"])
+            except tk.TclError:
+                pass
+
+        self._theme_jobs.append(theme_job)
+        return text
+
+    # ------------------------------------------------------------------
+    # 2.1 保存位置：下拉框 + 历史
+    # ------------------------------------------------------------------
+    def _dir_text(self):
+        """读保存位置（Combobox 的可编辑输入框也是 ``.get()``）。"""
+        try:
+            return str(self.dir_entry.get() or "").strip()
+        except Exception:
+            return ""
+
+    def _set_dir_text(self, text):
+        """写保存位置：等价于原来的 ``delete(0,'end') + insert(0, text)``。"""
+        try:
+            self.dir_entry.delete(0, "end")
+            self.dir_entry.insert(0, text or "")
+        except Exception:
+            pass
+
+    def _reload_dir_history(self):
+        """把设置里的历史目录灌进下拉框（读不到就只留当前值）。"""
+        try:
+            values = self.settings_bridge.history(DIR_HISTORY_LIMIT)
+        except Exception:
+            values = []
+        try:
+            self.dir_entry.configure(values=list(values))
+        except Exception:
+            pass
+        return values
+
+    def _remember_dir(self, path):
+        """记一次实际用过的目录，并刷新下拉候选。"""
+        text = str(path or "").strip()
+        if not text:
+            return
+        try:
+            values = self.settings_bridge.push_dir(text, DIR_HISTORY_LIMIT)
+        except Exception:
+            values = []
+        try:
+            self.dir_entry.configure(values=list(values))
+        except Exception:
+            pass
+
     def _build_input_card(self):
         palette = self.palette
         card = self._register_tint(widgets.Card(self.root, palette=palette))
@@ -662,16 +1187,20 @@ class App(object):
         body = card.body
         body.configure(padx=16, pady=16)
 
-        # 第一行：链接 + 主按钮
+        # 第一行：多行链接输入 + 主按钮
         link_row = self._frame(body, "surface")
         link_row.pack(fill="x")
-        self.link_entry = self._entry(link_row, "surface_alt")
-        self.link_entry.pack(side="left", fill="x", expand=True, ipady=8, padx=(0, 8))
-        self._attach_placeholder(self.link_entry, "在这里粘贴 MediaFire 文件或文件夹链接（Ctrl+V）")
+        self.link_entry = self._build_link_text(link_row)
+        self.link_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._attach_placeholder(
+            self.link_entry,
+            "一行一个链接，Ctrl+V 可以一次粘多条\n"
+            "支持单个文件，也支持整个文件夹\n"
+            "粘好后按 Ctrl+Enter 解析")
         self.parse_btn = self._register_tint(widgets.RoundedButton(
             link_row, "解析并加入队列", command=self._on_parse, kind="primary",
             palette=palette, fonts=self.fonts, height=34, min_width=136))
-        self.parse_btn.pack(side="right")
+        self.parse_btn.pack(side="right", anchor="n")
 
         # 第二行：目录 / 线程 / 间隔 / 含子文件夹
         options_row = self._frame(body, "surface")
@@ -679,12 +1208,15 @@ class App(object):
 
         self._label(options_row, "保存到", fg_token="text_dim",
                     font=self.fonts.small).pack(side="left", padx=(0, 8))
-        self.dir_entry = self._entry(options_row, "surface_alt")
-        self.dir_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        # 可编辑下拉框：值取历史目录，仍可手打任意路径
+        self.dir_entry = ttk.Combobox(options_row, style="TCombobox",
+                                      font=self.fonts.body, width=32)
+        self.dir_entry.pack(side="left", fill="x", expand=True, ipady=3)
         try:
             self.dir_entry.insert(0, self.kernel.default_download_dir())
         except Exception:
             pass
+        self._reload_dir_history()
         self.browse_btn = self._register_tint(widgets.RoundedButton(
             options_row, "浏览…", command=self._choose_dir, kind="subtle",
             palette=palette, fonts=self.fonts, height=30, pad_x=12))
@@ -696,18 +1228,18 @@ class App(object):
             palette=palette, fonts=self.fonts, height=30, pad_x=12))
         self.open_dir_btn.pack(side="left", padx=(0, 16))
 
-        self._label(options_row, "线程", fg_token="text_dim",
+        self._label(options_row, "并发", fg_token="text_dim",
                     font=self.fonts.small).pack(side="left", padx=(0, 8))
         self.threads_spin = self._spinbox(options_row, 1, 8, 1, width=3)
         self.threads_spin.delete(0, "end")
-        self.threads_spin.insert(0, "2")
+        self.threads_spin.insert(0, str(DEFAULT_THREADS))
         self.threads_spin.pack(side="left", ipady=4)
 
         self._label(options_row, "间隔(秒)", fg_token="text_dim",
                     font=self.fonts.small).pack(side="left", padx=(16, 8))
-        self.gap_spin = self._spinbox(options_row, 0.2, 10.0, 0.5, width=4)
+        self.gap_spin = self._spinbox(options_row, 0.0, 5.0, 0.5, width=4)
         self.gap_spin.delete(0, "end")
-        self.gap_spin.insert(0, "1.0")
+        self.gap_spin.insert(0, "%.1f" % DEFAULT_GAP)
         self.gap_spin.pack(side="left", ipady=4)
 
         self.subfolder_var = tk.BooleanVar(value=True)
@@ -719,6 +1251,51 @@ class App(object):
         self.autostart_var = tk.BooleanVar(value=True)
         self.autostart_chk = self._checkbutton(options_row, "解析后自动开始", self.autostart_var)
         self.autostart_chk.pack(side="left", padx=(16, 0))
+
+        # 2.5 行：限速 / 完成后动作 / 自动建子目录
+        options_row2 = self._frame(body, "surface")
+        options_row2.pack(fill="x", pady=(10, 0))
+
+        self._label(options_row2, "限速", fg_token="text_dim",
+                    font=self.fonts.small).pack(side="left", padx=(0, 8))
+        self.speed_entry = self._entry(options_row2, "surface_alt", width=7)
+        self.speed_entry.pack(side="left", ipady=4)
+        try:
+            self.speed_entry.insert(0, "0")
+        except tk.TclError:
+            pass
+        self._label(options_row2, "KB/s（0＝不限）", fg_token="text_dim",
+                    font=self.fonts.small).pack(side="left", padx=(6, 24))
+
+        self._label(options_row2, "全部完成后", fg_token="text_dim",
+                    font=self.fonts.small).pack(side="left", padx=(0, 8))
+        self.finish_var = tk.StringVar(value=FINISH_ACTIONS[0])
+        self.finish_combo = ttk.Combobox(
+            options_row2, textvariable=self.finish_var, state="readonly",
+            values=list(FINISH_ACTIONS), font=self.fonts.body, width=10)
+        self.finish_combo.pack(side="left")
+        self.finish_combo.bind("<<ComboboxSelected>>", self._on_finish_action_change)
+
+        # 用户最在意的功能：按 MediaFire 文件夹名建子目录（默认勾上）
+        self.auto_folder_var = tk.BooleanVar(value=True)
+        self.auto_folder_chk = self._checkbutton(
+            options_row2, "按 MediaFire 文件夹名建子目录", self.auto_folder_var)
+        self.auto_folder_chk.configure(command=self._on_auto_folder_toggle)
+        self.auto_folder_chk.pack(side="left", padx=(24, 0))
+
+        # 实际落盘位置（建了子目录之后和输入框里的目录不是一回事，得让用户看见）
+        self.effective_label = self._label(
+            body, "实际存到：—", bg_token="surface", fg_token="text_dim",
+            font=self.fonts.small, anchor="w")
+        self.effective_label.pack(fill="x", pady=(6, 0))
+
+        # 并发/间隔/限速改动 → 延迟写回引擎
+        for widget in (self.threads_spin, self.gap_spin):
+            for sequence in ("<FocusOut>", "<KeyRelease>",
+                             "<<Increment>>", "<<Decrement>>"):
+                widget.bind(sequence, self._on_options_changed, add="+")
+        for sequence in ("<FocusOut>", "<KeyRelease>", "<Return>"):
+            self.speed_entry.bind(sequence, self._on_options_changed, add="+")
 
         # 第三行：动作按钮 + 快捷键提示
         action_row = self._frame(body, "surface")
@@ -828,8 +1405,33 @@ class App(object):
     def _build_queue_tab(self):
         palette = self.palette
         page = self._frame(self.notebook, "surface")
+
+        # 工具条：文件名搜索 + 状态筛选（两者是 AND 关系）
+        toolbar = self._frame(page, "surface")
+        toolbar.pack(fill="x", padx=16, pady=(16, 0))
+
+        self._label(toolbar, "搜索", fg_token="text_dim",
+                    font=self.fonts.small).pack(side="left", padx=(0, 8))
+        self.search_entry = self._entry(toolbar, "surface_alt", width=26)
+        self.search_entry.pack(side="left", ipady=4)
+        self._attach_placeholder(self.search_entry, "搜索文件名…")
+        self.search_entry.bind("<KeyRelease>", self._on_search_key, add="+")
+
+        self._label(toolbar, "状态", fg_token="text_dim",
+                    font=self.fonts.small).pack(side="left", padx=(16, 8))
+        self.status_filter_var = tk.StringVar(value=STATUS_FILTERS[0])
+        self.status_combo = ttk.Combobox(
+            toolbar, textvariable=self.status_filter_var, state="readonly",
+            values=list(STATUS_FILTERS), font=self.fonts.body, width=8)
+        self.status_combo.pack(side="left")
+        self.status_combo.bind("<<ComboboxSelected>>", self._on_status_filter)
+
+        self.filter_hint = self._label(toolbar, "", fg_token="text_dim",
+                                       font=self.fonts.small, anchor="e")
+        self.filter_hint.pack(side="right", pady=(6, 0))
+
         wrapper = self._frame(page, "surface")
-        wrapper.pack(fill="both", expand=True, padx=16, pady=16)
+        wrapper.pack(fill="both", expand=True, padx=16, pady=(8, 16))
 
         columns = ("name", "size", "progress", "speed", "status", "path")
         headings = {"name": "文件名", "size": "大小", "progress": "进度",
@@ -861,16 +1463,21 @@ class App(object):
         # 空状态：和表格同一格居中叠着，有任务时 grid_remove()
         self.empty_state = self._frame(wrapper, "surface")
         self.empty_state.grid(row=0, column=0, sticky="")
-        self._label(self.empty_state, "还没有任务", bg_token="surface",
-                    fg_token="text", font=self.fonts.head,
-                    anchor="center").pack(side="top")
-        self._label(self.empty_state,
-                    "在上面粘一个 MediaFire 分享链接，按 Ctrl+Enter",
-                    bg_token="surface", fg_token="text_dim",
-                    font=self.fonts.body, anchor="center").pack(side="top", pady=(8, 0))
-        self._label(self.empty_state, "支持单文件与整个文件夹",
-                    bg_token="surface", fg_token="text_dim",
-                    font=self.fonts.small, anchor="center").pack(side="top", pady=(4, 0))
+        self._empty_title = self._label(
+            self.empty_state, "还没有任务", bg_token="surface",
+            fg_token="text", font=self.fonts.head, anchor="center")
+        self._empty_title.pack(side="top")
+        self._empty_hint = self._label(
+            self.empty_state,
+            "在上面粘一个 MediaFire 分享链接，按 Ctrl+Enter",
+            bg_token="surface", fg_token="text_dim",
+            font=self.fonts.body, anchor="center")
+        self._empty_hint.pack(side="top", pady=(8, 0))
+        self._empty_sub = self._label(
+            self.empty_state, "支持单文件与整个文件夹",
+            bg_token="surface", fg_token="text_dim",
+            font=self.fonts.small, anchor="center")
+        self._empty_sub.pack(side="top", pady=(4, 0))
         self.empty_state.lift()
         return page
 
@@ -966,6 +1573,18 @@ class App(object):
             toolbar, "重新采集", command=self._refresh_diagnostics, kind="ghost",
             palette=self.palette, fonts=self.fonts, height=34))
         self.diag_refresh_btn.pack(side="left", padx=(8, 0))
+        # 反馈问题时一份 zip 打包带走：诊断 JSON + 失败清单 + 日志 + 说明
+        self.diag_bundle_btn = self._register_tint(widgets.RoundedButton(
+            toolbar, "导出诊断包", command=self._on_export_bundle, kind="ghost",
+            palette=self.palette, fonts=self.fonts, height=34,
+            tooltip="把诊断报告、失败清单、日志和一份说明打成一个 zip"))
+        self.diag_bundle_btn.pack(side="left", padx=(8, 0))
+        # 失败清单和诊断报告都写在数据目录里，给个按钮直接打开
+        self.diag_data_btn = self._register_tint(widgets.RoundedButton(
+            toolbar, "打开数据目录", command=self._on_open_data_dir, kind="ghost",
+            palette=self.palette, fonts=self.fonts, height=34,
+            tooltip="打开存放失败清单与诊断报告的目录"))
+        self.diag_data_btn.pack(side="left", padx=(8, 0))
         self.diag_hint = self._label(
             toolbar, "按系统与错误类型交叉归集，反馈问题时请附上这份报告",
             fg_token="text_dim", font=self.fonts.small, anchor="e")
@@ -1046,7 +1665,17 @@ class App(object):
     # ------------------------------------------------------------------
     def _toggle_theme(self):
         target = theme.MODE_LIGHT if theme.mode() == theme.MODE_DARK else theme.MODE_DARK
-        theme.apply_style(self.root, target)
+        self._repaint_theme(target)
+        self._log("INFO 已切换到%s主题" % theme.MODE_TEXT.get(theme.mode(), ""))
+        self._settings_set("theme", theme.mode())
+
+    def _repaint_theme(self, mode=None):
+        """把整套配色重刷一遍（切主题和启动时恢复设置都走这里）。
+
+        ``mode`` 为空表示保持当前模式只重刷；给值时先切换主题再重刷。
+        """
+        if mode:
+            theme.apply_style(self.root, mode)
         self.palette = theme.current()
         for job in list(self._theme_jobs):
             try:
@@ -1055,11 +1684,17 @@ class App(object):
                 pass
             except Exception:
                 pass
-        self.root.configure(bg=self.palette["bg"])
-        self.theme_btn.set_text(self._theme_button_text())
+        try:
+            self.root.configure(bg=self.palette["bg"])
+        except tk.TclError:
+            pass
+        try:
+            self.theme_btn.set_text(self._theme_button_text())
+        except Exception:
+            pass
         self._retint_trees()
         self._retint_text()
-        self._log("INFO 已切换到%s主题" % theme.MODE_TEXT.get(theme.mode(), ""))
+        return self.palette
 
     def _retint_trees(self):
         palette = self.palette
@@ -1109,60 +1744,116 @@ class App(object):
     # ------------------------------------------------------------------
     # 3.3 占位提示
     # ------------------------------------------------------------------
-    def _attach_placeholder(self, entry, hint):
-        state = {"active": False, "hint": hint}
+    def _attach_placeholder(self, widget, hint):
+        """给输入控件挂一段灰色占位提示。
 
-        def show():
-            if state["active"] or entry.get():
+        ``tk.Entry`` 与 ``tk.Text`` 的索引写法不同（Text 没有 ``0`` 这个索引），
+        所以位置一律通过 ``start()`` / ``end()`` 换算；Text 的占位文字用 tag 上色，
+        免得整段内容都跟着变灰。
+        """
+        is_text = _is_text_widget(widget)
+        state = {"active": False, "hint": hint, "text": is_text}
+
+        def start():
+            return "1.0" if is_text else 0
+
+        def finish():
+            return "end-1c" if is_text else "end"
+
+        def paint(token):
+            if is_text:
+                try:
+                    widget.tag_configure("placeholder", foreground=self.palette[token])
+                    widget.tag_add("placeholder", "1.0", "end-1c")
+                except tk.TclError:
+                    pass
                 return
-            state["active"] = True
             try:
-                entry.configure(fg=self.palette["text_dim"])
+                widget.configure(fg=self.palette[token])
             except tk.TclError:
                 pass
-            entry.insert(0, hint)
+
+        def current():
+            """控件里现在的文字（去掉尾部换行）。"""
+            if is_text:
+                return widget.get("1.0", "end-1c").strip()
+            return widget.get()
+
+        def show():
+            if state["active"] or current():
+                return
+            state["active"] = True
+            widget.insert(start(), hint)
+            paint("text_dim")
 
         def hide():
             if not state["active"]:
                 return
             state["active"] = False
-            entry.delete(0, "end")
-            try:
-                entry.configure(fg=self.palette["text"])
-            except tk.TclError:
-                pass
+            widget.delete(start(), finish())
+            if is_text:
+                try:
+                    widget.tag_remove("placeholder", "1.0", "end")
+                except tk.TclError:
+                    pass
+            else:
+                try:
+                    widget.configure(fg=self.palette["text"])
+                except tk.TclError:
+                    pass
 
-        entry.bind("<FocusIn>", lambda _event: hide(), add="+")
-        entry.bind("<FocusOut>", lambda _event: show(), add="+")
+        widget.bind("<FocusIn>", lambda _event: hide(), add="+")
+        widget.bind("<FocusOut>", lambda _event: show(), add="+")
 
         def theme_job(palette):
             if state["active"]:
                 try:
-                    entry.configure(fg=palette["text_dim"])
+                    if is_text:
+                        widget.tag_configure("placeholder",
+                                             foreground=palette["text_dim"])
+                        widget.tag_add("placeholder", "1.0", "end-1c")
+                    else:
+                        widget.configure(fg=palette["text_dim"])
                 except tk.TclError:
                     pass
 
         self._theme_jobs.append(theme_job)
-        entry._mfd_placeholder = state
+        widget._mfd_placeholder = state
         show()
 
     def _entry_text(self, entry):
         state = getattr(entry, "_mfd_placeholder", None)
         if state and state["active"]:
             return ""
+        if _is_text_widget(entry):
+            try:
+                return entry.get("1.0", "end-1c").strip()
+            except tk.TclError:
+                return ""
         return entry.get().strip()
 
     def _set_entry_text(self, entry, value, replace=True):
+        is_text = _is_text_widget(entry)
         state = getattr(entry, "_mfd_placeholder", None)
-        if state and state["active"]:
+        was_placeholder = bool(state and state["active"])
+        if was_placeholder:
             state["active"] = False
-            entry.delete(0, "end")
-            try:
-                entry.configure(fg=self.palette["text"])
-            except tk.TclError:
-                pass
-        if replace:
-            entry.delete(0, "end")
+            if is_text:
+                try:
+                    entry.tag_remove("placeholder", "1.0", "end")
+                except tk.TclError:
+                    pass
+            else:
+                try:
+                    entry.configure(fg=self.palette["text"])
+                except tk.TclError:
+                    pass
+        # 占位文字留在里面会让新内容接在提示后面，所以清掉它的那一轮也要清空
+        if replace or was_placeholder:
+            if is_text:
+                entry.delete("1.0", "end")
+            else:
+                entry.delete(0, "end")
         entry.insert("end", value)
 
     # ------------------------------------------------------------------
@@ -1187,9 +1878,10 @@ class App(object):
 
     def _on_paste(self, _event=None):
         widget = self.root.focus_get()
-        # 其它输入框（目录、线程数）走 Tk 默认粘贴，不在这里抢
-        if isinstance(widget, (tk.Entry, tk.Spinbox)) and widget is not self.link_entry:
-            return None
+        # 别的输入框（目录、线程数、日志区）走 Tk 默认粘贴，不在这里抢
+        if widget is not None and widget is not self.link_entry:
+            if isinstance(widget, (tk.Entry, tk.Spinbox, tk.Text)):
+                return None
         try:
             data = self.root.clipboard_get()
         except tk.TclError:
@@ -1201,10 +1893,18 @@ class App(object):
         self._set_entry_text(self.link_entry, data, replace=True)
         try:
             self.link_entry.focus_set()
-            self.link_entry.icursor("end")
+            if _is_text_widget(self.link_entry):
+                self.link_entry.mark_set("insert", "end")
+                self.link_entry.see("end")
+            else:
+                self.link_entry.icursor("end")
         except tk.TclError:
             pass
-        self._set_status("已粘贴链接，按 Ctrl+Enter 开始解析", "info")
+        links = _split_links(data)
+        if len(links) > 1:
+            self._set_status("已粘贴 %d 个链接，按 Ctrl+Enter 开始解析" % len(links), "info")
+        else:
+            self._set_status("已粘贴链接，按 Ctrl+Enter 开始解析", "info")
         return "break"
 
     def _shortcut_parse(self, _event=None):
@@ -1270,6 +1970,10 @@ class App(object):
             self._on_export_ready(*payload)
         elif kind == "diag_ready":
             self._on_diag_ready(*payload)
+        elif kind == "bundle_ready":
+            self._on_bundle_ready(*payload)
+        elif kind == "update_result":
+            self._on_update_result(*payload)
 
     def _on_kernel_event(self, event, payload):
         """内核回调（后台线程）→ 一律转主线程。"""
@@ -1363,28 +2067,21 @@ class App(object):
     # 3.7 选项读取
     # ------------------------------------------------------------------
     def _read_options(self):
-        """从界面读出一次下载配置；不合法就返回 None 并提示。"""
-        directory = self._entry_text(self.dir_entry)
+        """从界面读出一次下载配置；不合法就返回兜底值并提示。"""
+        directory = self._dir_text()
         if not directory:
             try:
                 directory = self.kernel.default_download_dir()
             except Exception:
                 directory = _fallback_download_dir()
-        try:
-            threads = int(float(self.threads_spin.get() or 2))
-        except (TypeError, ValueError):
-            threads = 2
-        threads = max(1, min(8, threads))
-        try:
-            gap = float(self.gap_spin.get() or 1.0)
-        except (TypeError, ValueError):
-            gap = 1.0
-        gap = max(0.0, min(10.0, gap))
+        threads = self._threads_value()
+        gap = self._gap_value()
         return {
             "dir": directory,
             "threads": threads,
             "gap": gap,
             "include": bool(self.subfolder_var.get()),
+            "speed_kbps": self._speed_limit_value(),
         }
 
     # ------------------------------------------------------------------
@@ -1396,8 +2093,9 @@ class App(object):
         if self._running:
             self._set_status("正在下载中，请先停止再解析新链接", "warning")
             return
-        url = self._entry_text(self.link_entry)
-        if not url:
+        raw = self._entry_text(self.link_entry)
+        links = _split_links(raw)
+        if not links:
             self._set_status("请先粘贴 MediaFire 链接", "warning")
             try:
                 self.link_entry.focus_set()
@@ -1405,11 +2103,68 @@ class App(object):
                 pass
             return
         options = self._read_options()
-        self._set_busy(True, "正在解析链接…")
-        self._log("INFO 开始解析：%s" % url)
-        thread = threading.Thread(target=self._resolve_worker, args=(url, options),
-                                  name="mfd-resolve", daemon=True)
+        self._typing_urls = list(links)
+        if len(links) == 1:
+            self._last_url = links[0]
+            self._set_busy(True, "正在解析链接…")
+            self._log("INFO 开始解析：%s" % links[0])
+            thread = threading.Thread(target=self._resolve_worker, args=(links[0], options),
+                                      name="mfd-resolve", daemon=True)
+            thread.start()
+            return
+        # 多行：一条一条解析，进度经事件队列回主线程
+        self._last_url = links[0]
+        self._set_busy(True, "正在解析 1/%d …" % len(links))
+        self._log("INFO 开始批量解析：共 %d 条链接" % len(links))
+        thread = threading.Thread(target=self._resolve_worker_batch,
+                                  args=(list(links), options),
+                                  name="mfd-resolve-batch", daemon=True)
         thread.start()
+
+    def _resolve_worker_batch(self, urls, options):
+        """后台：一条一条解析多行链接，最后合起来建队列。
+
+        单条失败只记一笔、不中断整批——十个链接里坏一个，剩下九个照样入库。
+        """
+        total = len(urls)
+        collected = []
+        failed = []
+        for index, url in enumerate(urls, 1):
+            self._post("status", "正在解析 %d/%d …" % (index, total))
+            try:
+                items, _description = self.kernel.resolve_link(
+                    url,
+                    include_subfolders=options["include"],
+                    on_progress=self._on_resolve_progress,
+                )
+            except Exception as exc:
+                message = (getattr(exc, "user_message", "") or str(exc)
+                           or exc.__class__.__name__)
+                failed.append((url, message))
+                self._post("log", "WARN 第 %d/%d 条解析失败：%s" % (index, total, message))
+                continue
+            merged = list(items or [])
+            collected.extend(merged)
+            self._post("log", "INFO 第 %d/%d 条：%d 个文件" % (index, total, len(merged)))
+
+        if not collected:
+            detail = "\n".join("%s → %s" % (url, msg) for url, msg in failed[:6])
+            self._post("resolve_error", ("这几条链接都没能解析出文件。", detail))
+            return
+
+        try:
+            downloader = self._ensure_downloader(options)
+            tasks = downloader.load_tasks(collected)
+        except Exception:
+            self._post("resolve_error",
+                       ("链接已解析，但建立下载队列时出错。", traceback.format_exc()))
+            return
+
+        description = "%d 条链接共 %d 个文件" % (total, len(collected))
+        if failed:
+            description += "（%d 条失败）" % len(failed)
+        # 子目录名只取第一条链接的文件夹名：引擎一次只支持一个 collection_name
+        self._post("tasks_loaded", (list(tasks or []), description, urls[0]))
 
     def _resolve_worker(self, url, options):
         """后台：解析 + 建任务列表。全程只往队列里塞结果。"""
@@ -1487,6 +2242,14 @@ class App(object):
         self._set_status("已加入队列：%s" % summary, "success")
         self._apply_stats(self._local_stats())
 
+        # 新队列进来：先复位筛选，否则筛在「已完成」上时一条新任务都看不见
+        self._reset_queue_filter()
+        # 记住这次的链接，并按开关决定要不要建「文件夹名」子目录
+        self._last_url = str(url or "")
+        self._apply_collection_name(self._last_url)
+        self._apply_options_to_engine(verbose=False)
+        self._refresh_effective_root()
+
         # 解析完直接开始，省掉"再点一次"（用户 2026-11-02 明确要求）。
         # 用 after 让界面先把队列行画出来再启动，否则用户会觉得"点了没反应"。
         if self._tasks and self.autostart_var.get():
@@ -1546,7 +2309,11 @@ class App(object):
         return [str(part) for part in raw]
 
     def _update_empty_state(self):
-        """队列空了就把三行引导摆出来，有任务就收掉。"""
+        """队列空了就把三行引导摆出来，有任务就收掉。
+
+        注意「空了」有两种：真没任务，和筛完一条不剩。后者文案要换，
+        否则用户会以为任务丢了。
+        """
         empty = getattr(self, "empty_state", None)
         if empty is None:
             return
@@ -1554,6 +2321,7 @@ class App(object):
             has_rows = bool(self.queue_tree.get_children(""))
         except tk.TclError:
             return
+        self._set_empty_text(filtered=bool(self._tasks) and not has_rows)
         try:
             if has_rows:
                 empty.grid_remove()
@@ -1562,6 +2330,27 @@ class App(object):
                 empty.lift()
         except tk.TclError:
             pass
+
+    def _set_empty_text(self, filtered=False):
+        """空状态三行文案：默认引导，筛空时改成「没匹配到」。"""
+        if filtered:
+            pairs = (("没有匹配的任务", getattr(self, "_empty_title", None)),
+                     ("换个关键词，或者把状态筛选调回「全部」",
+                      getattr(self, "_empty_hint", None)),
+                     ("队列里共有 %d 个任务" % len(self._tasks),
+                      getattr(self, "_empty_sub", None)))
+        else:
+            pairs = (("还没有任务", getattr(self, "_empty_title", None)),
+                     ("在上面粘一个 MediaFire 分享链接，按 Ctrl+Enter",
+                      getattr(self, "_empty_hint", None)),
+                     ("支持单文件与整个文件夹", getattr(self, "_empty_sub", None)))
+        for text, label in pairs:
+            if label is None:
+                continue
+            try:
+                label.configure(text=text)
+            except Exception:
+                pass
 
     def _insert_task_row(self, task, index):
         values = self._task_row_values(task)
@@ -1738,6 +2527,8 @@ class App(object):
                 failures=failures,
             )
             self.downloader = downloader
+            # 限速只在引擎支持时才生效；不支持就当没设置过，不打断建队
+            self._apply_speed_limit(options.get("speed_kbps", 0))
             return downloader
 
     def _on_start(self):
@@ -1753,9 +2544,23 @@ class App(object):
         # 保存位置可能已经被用户改过，而引擎记的还是解析那一刻的目录。
         # 不同步的话，用户看到的是「我换了地方，它偏说没有写入权限」。
         try:
-            self.downloader.set_download_dir(self._entry_text(self.dir_entry))
+            self.downloader.set_download_dir(self._dir_text())
         except Exception:
             self._log("WARN 切换保存位置时出错：%s" % traceback.format_exc(limit=1))
+        # 开始之前把目录、并发、间隔、限速、子目录名一并推给引擎（它们的
+        # setter 都允许在未运行时调用），这样这一轮就是按界面上的数字跑的。
+        try:
+            self._remember_dir(self._dir_text())
+        except Exception:
+            pass
+        try:
+            self._apply_collection_name(self._last_url)
+        except Exception:
+            pass
+        try:
+            self._apply_options_to_engine(verbose=False)
+        except Exception:
+            pass
         try:
             started = bool(self.downloader.start())
         except Exception:
@@ -1770,12 +2575,8 @@ class App(object):
             actual_dir = str(getattr(self.downloader, "download_dir", "") or "")
         except Exception:
             actual_dir = ""
-        if started and actual_dir and actual_dir != self._entry_text(self.dir_entry):
-            try:
-                self.dir_entry.delete(0, "end")
-                self.dir_entry.insert(0, actual_dir)
-            except Exception:
-                pass
+        if started and actual_dir and actual_dir != self._dir_text():
+            self._set_dir_text(actual_dir)
             self._set_status("原目录写不进去，已自动改存到 %s" % actual_dir, "warning")
         if not started:
             # 启动失败可能有很多原因（目录不可写最常见），引擎会把真正的
@@ -1809,8 +2610,9 @@ class App(object):
         self.status_dot.set_state("busy")
         self._set_status("下载中…", "info")
         self._log("INFO 开始下载：%d 个任务，%d 线程，间隔 %.1f 秒"
-                  % (len(self._tasks), int(self.threads_spin.get() or 2),
-                     float(self.gap_spin.get() or 1.0)))
+                  % (len(self._tasks), self._threads_value(), self._gap_value()))
+        # 引擎里真正会落盘的目录（含子目录）现在才定下来，刷一行给用户看
+        self._refresh_effective_root()
         self._schedule_tick()
 
     def _alert_start_failed(self, title_text, detail):
@@ -1922,6 +2724,9 @@ class App(object):
         self._log("OK 下载结束：%s" % summary)
         self._set_status("下载结束：%s" % summary, "success" if not failed else "warning")
         self._refresh_failures()
+        # 「全部完成后」的收尾动作（不做事 / 打开文件夹 / 关机）。
+        # 放在三个分支弹窗之前：先干完活，再让用户看结果。
+        self._maybe_finish_action(done, failed)
 
         if self._background:
             self._background = False
@@ -2320,18 +3125,19 @@ class App(object):
     # 3.14 目录与关闭
     # ------------------------------------------------------------------
     def _choose_dir(self):
-        current = self._entry_text(self.dir_entry) or ""
+        current = self._dir_text()
         try:
             chosen = filedialog.askdirectory(parent=self.root, title="选择下载目录",
                                              initialdir=current or None)
         except tk.TclError:
             return
         if chosen:
-            self._set_entry_text(self.dir_entry, chosen, replace=True)
+            self._set_dir_text(chosen)
             self._set_status("下载目录已改为 %s" % chosen, "info")
+            self._refresh_effective_root()
 
     def _open_dir(self):
-        directory = self._entry_text(self.dir_entry)
+        directory = self._dir_text()
         if not directory:
             try:
                 directory = self.kernel.default_download_dir()
@@ -2373,6 +3179,820 @@ class App(object):
         else:
             self._set_status("当前系统不支持直接打开目录", "warning")
 
+    # ------------------------------------------------------------------
+    # 4.1 队列筛选：文件名搜索 + 状态筛选（AND）
+    # ------------------------------------------------------------------
+    def _search_keyword(self):
+        try:
+            return self._entry_text(self.search_entry).lower()
+        except Exception:
+            return ""
+
+    def _status_filter(self):
+        try:
+            return str(self.status_filter_var.get() or STATUS_FILTERS[0])
+        except Exception:
+            return STATUS_FILTERS[0]
+
+    def _filter_is_active(self):
+        return bool(self._search_keyword()) or self._status_filter() != STATUS_FILTERS[0]
+
+    def _on_search_key(self, _event=None):
+        # 每敲一下就把上一颗定时器取消、重排一颗，实现 150ms 防抖
+        self._schedule_filter()
+
+    def _on_status_filter(self, _event=None):
+        # 下拉是离散选择，不需要防抖
+        self._schedule_filter(immediate=True)
+
+    def _schedule_filter(self, immediate=False):
+        if self._filter_job is not None:
+            try:
+                self.root.after_cancel(self._filter_job)
+            except Exception:
+                pass
+            self._filter_job = None
+        if immediate:
+            self._apply_queue_filter()
+            return
+        try:
+            self._filter_job = self.root.after(SEARCH_DEBOUNCE_MS,
+                                               self._apply_queue_filter)
+        except Exception:
+            self._filter_job = None
+
+    def _row_matches(self, task):
+        """这一行是否该显示（关键词 AND 状态）。"""
+        keyword = self._search_keyword()
+        if keyword:
+            name = str(getattr(task, "name", "") or "").lower()
+            if keyword not in name:
+                return False
+        code = STATUS_FILTER_CODE.get(self._status_filter())
+        if code:
+            status = str(getattr(task, "status", "") or "").lower()
+            if status != code:
+                return False
+        return True
+
+    def _apply_queue_filter(self):
+        """按当前条件重排可见行。
+
+        两条实测结论决定了写法：
+        * 不能重建整棵树——选中态、滚动位置、斑马纹都会丢，所以只 ``detach``
+          要藏起来的行、``reattach`` 要露出来的行；
+        * ``move()`` 对已经 detach 的项完全不起作用，挂回去只能用 ``reattach``。
+        """
+        self._filter_job = None
+        tree = getattr(self, "queue_tree", None)
+        if tree is None:
+            return
+        try:
+            position = 0
+            for task in list(self._tasks):
+                iid = self._task_rows.get(id(task))
+                if not iid:
+                    continue
+                try:
+                    if not tree.exists(iid):
+                        continue
+                except tk.TclError:
+                    continue
+                if self._row_matches(task):
+                    try:
+                        tree.reattach(iid, "", position)
+                    except tk.TclError:
+                        pass
+                    position += 1
+                else:
+                    try:
+                        tree.detach(iid)
+                    except tk.TclError:
+                        pass
+            self._restripe_queue()
+            self._update_empty_state()
+            self._refresh_filter_hint()
+        except Exception:
+            pass
+
+    def _refresh_filter_hint(self, visible=None):
+        """工具条右边那句「筛选后 3 / 12」。"""
+        label = getattr(self, "filter_hint", None)
+        if label is None:
+            return
+        try:
+            if not self._filter_is_active():
+                label.configure(text="")
+                return
+            if visible is None:
+                visible = len(self.queue_tree.get_children(""))
+            label.configure(text="筛选后 %d / %d" % (visible, len(self._tasks)))
+        except Exception:
+            pass
+
+    def _reset_queue_filter(self):
+        """换了新队列就把筛选复位，免得新任务一条都看不见。"""
+        if not self._filter_is_active():
+            self._apply_queue_filter()
+            return
+        try:
+            self._set_entry_text(self.search_entry, "")
+        except Exception:
+            pass
+        try:
+            self.status_filter_var.set(STATUS_FILTERS[0])
+        except Exception:
+            pass
+        self._apply_queue_filter()
+        self._log("INFO 新队列已载入，搜索与状态筛选已复位为「全部」")
+
+    # ------------------------------------------------------------------
+    # 4.2 队列顺序：上移一位 / 置顶
+    # ------------------------------------------------------------------
+    def _move_task(self, task, offset):
+        """把任务在队列里往前挪（offset=-1 上移一位；置顶传一个很大的负数）。
+
+        挪的是引擎的 ``downloader.tasks``：那个 list 就是取任务的顺序，所以
+        改它就等于改下载先后。引擎内部没有再排一次队，不用碰别的东西。
+        """
+        if task is None:
+            return False
+        engine = getattr(self.downloader, "tasks", None)
+        source = engine if isinstance(engine, list) and task in engine else self._tasks
+        try:
+            index = source.index(task)
+        except (ValueError, AttributeError):
+            self._set_status("这个任务不在队列里", "warning")
+            return False
+        target = max(0, min(len(source) - 1, index + int(offset)))
+        if target == index:
+            self._set_status("已经排在最前面了" if offset < 0 else "已经排在最后面了",
+                             "text_dim")
+            return False
+        source.pop(index)
+        source.insert(target, task)
+        if source is not self._tasks:
+            # 界面遍历用的是 self._tasks，顺序要跟着一致，否则筛选重排会打架
+            try:
+                self._tasks.remove(task)
+                follower = source[target + 1] if target + 1 < len(source) else None
+                position = (self._tasks.index(follower)
+                            if follower is not None and follower in self._tasks
+                            else len(self._tasks))
+                self._tasks.insert(position, task)
+            except (ValueError, AttributeError):
+                pass
+        iid = self._task_rows.get(id(task))
+        try:
+            if iid and self.queue_tree.exists(iid):
+                self.queue_tree.move(iid, "", target)
+        except tk.TclError:
+            pass
+        self._apply_queue_filter()
+        name = str(getattr(task, "name", "") or "")
+        self._set_status("已把「%s」移到第 %d 位" % (name, target + 1), "info")
+        return True
+
+    def _copy_failure_reason(self, task):
+        """把失败原因抄进剪贴板（没有就复制「无」）。"""
+        reason = str(getattr(task, "error", "") or "").strip() or "无"
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(reason)
+        except tk.TclError:
+            self._set_status("剪贴板不可用", "warning")
+            return
+        self._set_status("已复制失败原因：%s" % reason[:60], "info")
+
+    def _open_task_url(self, task):
+        """在浏览器里打开这条任务的源页面。"""
+        url = str(getattr(task, "url", "") or "").strip()
+        if not url:
+            self._set_status("这个任务没有记录源页面地址", "warning")
+            return
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            self._set_status("打开浏览器失败：%s" % exc, "danger")
+            return
+        self._set_status("已在浏览器中打开源页面", "info")
+
+    # ------------------------------------------------------------------
+    # 4.3 并发 / 间隔 / 限速
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _int_or(value, default):
+        """把界面上读来的字符串转成 int，转不动就用默认值。"""
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _threads_value(self):
+        try:
+            text = self.threads_spin.get()
+        except Exception:
+            text = ""
+        return max(1, min(8, self._int_or(text, DEFAULT_THREADS)))
+
+    def _gap_value(self):
+        try:
+            text = self.gap_spin.get()
+        except Exception:
+            text = ""
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            value = DEFAULT_GAP
+        return max(0.0, min(5.0, value))
+
+    def _speed_limit_value(self):
+        """限速（KB/s），0 表示不限；填了乱码也按不限处理。"""
+        try:
+            text = self.speed_entry.get()
+        except Exception:
+            text = ""
+        return max(0, self._int_or(text, 0))
+
+    def _on_options_changed(self, _event=None):
+        self._schedule_options_apply()
+
+    def _schedule_options_apply(self):
+        if self._options_job is not None:
+            try:
+                self.root.after_cancel(self._options_job)
+            except Exception:
+                pass
+        try:
+            self._options_job = self.root.after(OPTIONS_DEBOUNCE_MS,
+                                                self._apply_options_to_engine)
+        except Exception:
+            self._options_job = None
+
+    def _apply_options_to_engine(self, verbose=True):
+        """把并发 / 间隔 / 限速写回引擎。
+
+        引擎的 ``set_options`` 只改**下一轮**要起的线程，正在跑的那几个线程
+        不受影响——这点必须写进日志，否则用户会觉得拖动数字没反应。
+        """
+        self._options_job = None
+        threads = self._threads_value()
+        gap = self._gap_value()
+        speed = self._speed_limit_value()
+        downloader = self.downloader
+        if downloader is None:
+            return False
+        try:
+            downloader.set_options(max_threads=threads, gap_seconds=gap)
+        except Exception:
+            pass
+        supported = self._apply_speed_limit(speed)
+        current = (threads, gap, speed)
+        if verbose and current != self._last_options:
+            self._last_options = current
+            text = "并发 %d，间隔 %.1f 秒，限速 %s" % (
+                threads, gap, ("不限" if not speed else "%d KB/s" % speed))
+            if speed and not supported:
+                text += "（当前引擎还不支持限速，这一项被忽略）"
+            self._log("INFO 参数已更新：%s；对正在下载的线程不生效，下一轮才完全起作用"
+                      % text)
+        return True
+
+    def _apply_speed_limit(self, speed):
+        """限速单独走一次 set_options，好精确兜住「引擎还没加这个参数」。"""
+        downloader = self.downloader
+        if downloader is None:
+            return False
+        try:
+            downloader.set_options(speed_limit_kbps=int(speed))
+            return True
+        except TypeError:
+            # 旧引擎没有 speed_limit_kbps：吞掉，界面照常用
+            return False
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    # 4.4 按文件夹名建子目录
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _folder_name_from_url(url):
+        """兜底解析：从 ``/folder/<key>/<名字>`` 里取名字。
+
+        比自己拼字符串更难错的做法是交给 ``urlparse``，顺便把 %xx 解码掉。
+        取不到就返回空串（＝不建子目录），绝不瞎猜一个名字出来。
+        """
+        text = str(url or "").strip()
+        if not text:
+            return ""
+        try:
+            from urllib.parse import unquote, urlparse
+        except ImportError:  # pragma: no cover - 3.x 一定有
+            return ""
+        try:
+            path = urlparse(text).path or ""
+        except Exception:
+            return ""
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 3 and parts[0].lower() == "folder":
+            name = unquote(parts[2]).strip()
+            return name
+        return ""
+
+    def _collection_name_for(self, url):
+        """拿这份链接对应的 MediaFire 文件夹名。
+
+        优先问内核（``mfd.mediafire.folder_display_name``），那份还没写出来
+        或者参数对不上时，退回自己的简易解析。
+        """
+        text = str(url or "").strip()
+        if not text:
+            return ""
+        try:
+            from .. import mediafire as mediafire_mod
+        except Exception:
+            mediafire_mod = None
+        if mediafire_mod is not None:
+            func = getattr(mediafire_mod, "folder_display_name", None)
+            if callable(func):
+                key = ""
+                try:
+                    extract = getattr(mediafire_mod, "extract_folder_key", None)
+                    if callable(extract):
+                        key = str(extract(text) or "")
+                except Exception:
+                    key = ""
+                for args in ((text, key), (text,)):
+                    try:
+                        name = str(func(*args) or "").strip()
+                    except TypeError:
+                        continue
+                    except Exception:
+                        break
+                    if name:
+                        return name
+        return self._folder_name_from_url(text)
+
+    def _apply_collection_name(self, url=None):
+        """按开关把子目录名交给引擎，并刷新「实际存到」。"""
+        downloader = self.downloader
+        if downloader is None:
+            self._refresh_effective_root()
+            return ""
+        try:
+            enabled = bool(self.auto_folder_var.get())
+        except Exception:
+            enabled = True
+        name = ""
+        if enabled:
+            name = self._collection_name_for(url if url is not None else self._last_url)
+        try:
+            downloader.set_collection_name(name if enabled else "")
+        except AttributeError:
+            # 旧引擎没有这个接口：只是不建子目录，不算错误
+            self._refresh_effective_root()
+            return ""
+        except Exception:
+            self._refresh_effective_root()
+            return ""
+        if enabled and name:
+            self._log("INFO 将建子目录：%s" % name)
+        elif enabled and url:
+            self._log("INFO 这条链接里没有文件夹名，文件直接存到保存位置")
+        self._refresh_effective_root()
+        return name
+
+    def _refresh_effective_root(self):
+        """把「文件实际会存到哪」写进那行小字（有子目录时和输入框不一样）。"""
+        label = getattr(self, "effective_label", None)
+        path = ""
+        try:
+            if self.downloader is not None:
+                path = str(self.downloader.effective_root() or "")
+        except Exception:
+            path = ""
+        if not path:
+            path = self._dir_text()
+        if label is None:
+            return
+        try:
+            label.configure(text="实际存到：%s" % (path or "—"))
+        except Exception:
+            pass
+
+    def _on_auto_folder_toggle(self):
+        """勾选框回调：关掉就立刻让引擎别建子目录。"""
+        try:
+            enabled = bool(self.auto_folder_var.get())
+        except Exception:
+            enabled = True
+        self._settings_set("auto_folder", enabled)
+        if enabled:
+            self._apply_collection_name()
+            return
+        try:
+            if self.downloader is not None:
+                self.downloader.set_collection_name("")
+        except Exception:
+            pass
+        self._log("INFO 已关闭「按 MediaFire 文件夹名建子目录」")
+        self._refresh_effective_root()
+
+    # ------------------------------------------------------------------
+    # 4.5 全部完成后做什么
+    # ------------------------------------------------------------------
+    def _finish_action(self):
+        try:
+            value = str(self.finish_var.get() or "").strip()
+        except Exception:
+            value = FINISH_ACTIONS[0]
+        return value if value in FINISH_ACTIONS else FINISH_ACTIONS[0]
+
+    def _on_finish_action_change(self, _event=None):
+        action = self._finish_action()
+        if action == "关机":
+            # 关机是不可逆的，选它必须当场确认一次；没确认就退回「不做事」
+            confirmed = False
+            try:
+                confirmed = bool(messagebox.askyesno(
+                    "确认关机",
+                    "全部下载完成后将自动关机，确定吗？",
+                    parent=self.root))
+            except Exception:
+                confirmed = False
+            if not confirmed:
+                try:
+                    self.finish_var.set(FINISH_ACTIONS[0])
+                except Exception:
+                    pass
+                self._set_status("已保持「完成后不做事」", "text_dim")
+                return
+        self._settings_set("finish_action", action)
+        self._log("INFO 全部下载完成后：%s" % action)
+
+    def _maybe_finish_action(self, done, failed):
+        """一轮下载结束后的收尾动作；有失败就什么都不做。"""
+        if failed:
+            return
+        action = self._finish_action()
+        if action == "打开文件夹":
+            try:
+                self._open_dir()
+            except Exception as exc:
+                self._log("WARN 打开下载文件夹失败：%s" % exc)
+            return
+        if action != "关机" or not done:
+            return
+        try:
+            os.system("shutdown /s /t 60")
+        except Exception as exc:
+            self._log("ERROR 关机命令没能执行：%s" % exc)
+            return
+        self._log("WARN 60 秒后关机，可用 shutdown /a 取消")
+
+    # ------------------------------------------------------------------
+    # 4.6 检查更新
+    # ------------------------------------------------------------------
+    def _on_check_update(self):
+        if self._update_checking:
+            return
+        self._update_checking = True
+        try:
+            self.update_btn.set_enabled(False)
+            self.update_btn.set_text("检查中…")
+        except Exception:
+            pass
+        self._set_status("正在检查更新…", "info")
+        version = str(getattr(self.kernel, "VERSION", "") or "")
+        try:
+            threading.Thread(target=self._update_worker, args=(version,),
+                             name="mfd-update", daemon=True).start()
+        except Exception as exc:
+            self._on_update_result(False, "", "", "线程起不来：%s" % exc)
+
+    def _update_worker(self, version):
+        """后台线程：只调接口，结果经事件队列回主线程。"""
+        try:
+            from .. import update as update_mod
+        except Exception as exc:
+            self._post("update_result", (False, "", "", "更新模块不可用（%s）" % exc))
+            return
+        func = getattr(update_mod, "check_latest_version", None)
+        if not callable(func):
+            self._post("update_result", (False, "", "", "更新模块里没有 check_latest_version"))
+            return
+        try:
+            result = func(version)
+        except Exception as exc:
+            detail = str(exc) or exc.__class__.__name__
+            self._post("update_result", (False, "", "", detail))
+            return
+        try:
+            has_new, latest, page = _parse_update_result(result, version)
+        except Exception as exc:
+            self._post("update_result", (False, "", "", str(exc) or "返回值看不懂"))
+            return
+        self._post("update_result", (has_new, latest, page, ""))
+
+    def _on_update_result(self, has_new, latest, page, error=""):
+        self._update_checking = False
+        try:
+            self.update_btn.set_enabled(True)
+            self.update_btn.set_text("检查更新")
+        except Exception:
+            pass
+        version = str(getattr(self.kernel, "VERSION", "") or "")
+        if error:
+            self._set_status("检查更新失败", "warning")
+            self._log("WARN 检查更新失败：%s" % error)
+            if self._is_viewable():
+                try:
+                    messagebox.showwarning("检查更新失败",
+                                           "网络不通或接口变了。\n%s" % error,
+                                           parent=self.root)
+                except Exception:
+                    pass
+            return
+        if not has_new:
+            self._set_status("已是最新版本", "success")
+            self._log("OK 已是最新版本：v%s" % (version or "?"))
+            if self._is_viewable():
+                try:
+                    messagebox.showinfo(
+                        "已是最新版本",
+                        "当前 v%s 就是最新版本。" % (version or "?"),
+                        parent=self.root)
+                except Exception:
+                    pass
+            return
+        self._set_status("发现新版本 v%s" % (latest or "?"), "info")
+        self._log("INFO 发现新版本：v%s（当前 v%s）" % (latest or "?", version or "?"))
+        if not self._is_viewable():
+            return
+        open_page = False
+        try:
+            # 用 askyesno 才拿得到「是/否」；showinfo 只有确定，没法据此开浏览器
+            open_page = bool(messagebox.askyesno(
+                "发现新版本",
+                "最新 v%s\n\n是否打开下载页？" % (latest or "?"),
+                parent=self.root))
+        except Exception:
+            open_page = False
+        if not open_page:
+            return
+        if not page:
+            self._set_status("新版本没有提供下载页地址", "warning")
+            return
+        try:
+            webbrowser.open(page)
+        except Exception as exc:
+            self._set_status("打开下载页失败：%s" % exc, "danger")
+
+    # ------------------------------------------------------------------
+    # 4.7 导出诊断包 / 打开数据目录
+    # ------------------------------------------------------------------
+    def _on_export_bundle(self):
+        """把诊断报告、失败清单、日志和说明打成一个 zip。"""
+        default = "MediaFire诊断包_%s.zip" % time.strftime("%Y%m%d_%H%M%S")
+        try:
+            path = filedialog.asksaveasfilename(
+                parent=self.root, title="导出诊断包",
+                initialfile=default, defaultextension=".zip",
+                filetypes=[("压缩包", "*.zip"), ("所有文件", "*.*")])
+        except Exception as exc:
+            self._set_status("选择保存位置失败：%s" % exc, "danger")
+            return
+        if not path:
+            return
+
+        # 这三样都在主线程里取好再交给后台线程——tkinter 控件不能跨线程碰
+        try:
+            self._ensure_diagnostics()
+            report = self.diagnostics.build_report(failures=self.failures) or {}
+        except Exception as exc:
+            report = {"error": "诊断报告生成失败：%s" % exc}
+        try:
+            records = self._failure_records()
+            failures = [self._failure_values(record) for record in records]
+        except Exception:
+            failures = []
+        try:
+            log_text = self.log_text.get("1.0", "end-1c")
+        except Exception:
+            log_text = ""
+
+        try:
+            self.diag_bundle_btn.set_enabled(False)
+        except Exception:
+            pass
+        self._set_status("正在打包诊断信息…", "info")
+        try:
+            threading.Thread(target=self._bundle_worker,
+                             args=(path, report, failures, log_text),
+                             name="mfd-bundle", daemon=True).start()
+        except Exception as exc:
+            try:
+                self.diag_bundle_btn.set_enabled(True)
+            except Exception:
+                pass
+            self._set_status("起线程失败：%s" % exc, "danger")
+
+    def _bundle_worker(self, path, report, failures, log_text):
+        """后台写 zip。文件名里不带目录，所以天然不会有反斜杠分隔符。"""
+        try:
+            directory = os.path.dirname(os.path.abspath(path))
+            if directory and not os.path.isdir(directory):
+                os.makedirs(directory)
+            payload = (
+                # (包内路径, 内容)；将来若要加子目录，分隔符必须写 "/"
+                ("diagnostics.json",
+                 json.dumps(report, ensure_ascii=False, indent=2, default=str)),
+                ("failures.json",
+                 json.dumps(failures, ensure_ascii=False, indent=2, default=str)),
+                ("app.log", log_text or ""),
+                ("README.txt", _BUNDLE_README),
+            )
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
+                for name, content in payload:
+                    bundle.writestr(name, content)
+        except Exception as exc:
+            self._post("bundle_ready", ("", str(exc) or exc.__class__.__name__))
+            return
+        self._post("bundle_ready", (path, ""))
+
+    def _on_bundle_ready(self, path, error=""):
+        try:
+            self.diag_bundle_btn.set_enabled(True)
+        except Exception:
+            pass
+        if error:
+            self._set_status("导出诊断包失败", "danger")
+            self._log("ERROR 导出诊断包失败：%s" % error)
+            if self._is_viewable():
+                try:
+                    messagebox.showerror("导出失败",
+                                         "没能写出诊断包。\n%s" % error,
+                                         parent=self.root)
+                except Exception:
+                    pass
+            return
+        self._set_status("诊断包已导出", "success")
+        self._log("OK 诊断包已导出：%s" % path)
+        if self._is_viewable():
+            try:
+                messagebox.showinfo("导出完成", "诊断包已保存到：\n%s" % path,
+                                    parent=self.root)
+            except Exception:
+                pass
+
+    def _on_open_data_dir(self):
+        """打开数据目录（失败清单、诊断报告都写在这里）。"""
+        try:
+            from ..paths import data_dir
+            path = data_dir(create=True)
+        except Exception as exc:
+            self._set_status("找不到数据目录：%s" % exc, "danger")
+            return
+        if not path:
+            self._set_status("数据目录还没建好，稍后再试", "warning")
+            return
+        try:
+            self._open_in_explorer(path)
+        except OSError as exc:
+            self._set_status("打开目录失败：%s" % exc, "danger")
+            return
+        self._set_status("已打开数据目录", "info")
+
+    # ------------------------------------------------------------------
+    # 4.8 设置读写与界面状态恢复
+    # ------------------------------------------------------------------
+    def _settings_get(self, key, default=None):
+        try:
+            return self.settings_bridge.get(key, default)
+        except Exception:
+            return default
+
+    def _settings_set(self, key, value, save=True):
+        try:
+            ok = self.settings_bridge.set(key, value)
+        except Exception:
+            ok = False
+        if ok and save:
+            try:
+                self.settings_bridge.save()
+            except Exception:
+                pass
+        return ok
+
+    def _restore_ui_state(self):
+        """把上次退出时的几何、主题、链接与各项开关放回去。
+
+        每一项都单独 try/except：设置文件缺失、字段写坏、几何字符串不合法，
+        都只跳过那一项，绝不影响窗口打开。
+        """
+        if getattr(self.settings_bridge, "module", None) is None:
+            # mfd.settings 还不存在：保持默认值即可
+            self._refresh_effective_root()
+            return
+        try:
+            mode = str(self._settings_get("theme", "") or "")
+            if mode in (theme.MODE_DARK, theme.MODE_LIGHT) and mode != theme.mode():
+                self._repaint_theme(mode)
+        except Exception:
+            pass
+        try:
+            geometry = str(self._settings_get("window_geometry", "") or "")
+            if _valid_geometry(geometry):
+                self.root.geometry(geometry)
+        except Exception:
+            pass
+        try:
+            last_url = str(self._settings_get("last_url", "") or "")
+            if last_url.strip():
+                self._set_entry_text(self.link_entry, last_url)
+        except Exception:
+            pass
+        try:
+            threads = self._int_or(self._settings_get("max_threads", DEFAULT_THREADS),
+                                   DEFAULT_THREADS)
+            threads = max(1, min(8, threads))
+            self.threads_spin.delete(0, "end")
+            self.threads_spin.insert(0, str(threads))
+        except Exception:
+            pass
+        try:
+            gap = float(self._settings_get("gap_seconds", DEFAULT_GAP))
+            gap = max(0.0, min(5.0, gap))
+            self.gap_spin.delete(0, "end")
+            self.gap_spin.insert(0, "%.1f" % gap)
+        except Exception:
+            pass
+        try:
+            speed = max(0, self._int_or(self._settings_get("speed_limit_kbps", 0), 0))
+            self._set_entry_text(self.speed_entry, str(speed))
+        except Exception:
+            pass
+        try:
+            action = str(self._settings_get("finish_action", FINISH_ACTIONS[0]) or "")
+            self.finish_var.set(action if action in FINISH_ACTIONS else FINISH_ACTIONS[0])
+        except Exception:
+            pass
+        try:
+            self.auto_folder_var.set(bool(self._settings_get("auto_folder", True)))
+        except Exception:
+            pass
+        try:
+            for key, var in (("include_subfolders", self.subfolder_var),
+                             ("autostart", self.autostart_var)):
+                value = self._settings_get(key, None)
+                if isinstance(value, bool):
+                    var.set(value)
+        except Exception:
+            pass
+        self._refresh_effective_root()
+
+    def _save_ui_state(self):
+        """退出前把界面状态记下来；哪一步失败都只跳过那一步。"""
+        if getattr(self.settings_bridge, "module", None) is None:
+            return
+        try:
+            geometry = self.root.geometry()
+            # 窗口被隐藏、还没布局时 geometry() 是 1x1+0+0；存下去下次启动就毁了
+            if _valid_geometry(geometry):
+                self._settings_set("window_geometry", geometry, save=False)
+        except Exception:
+            pass
+        try:
+            self._settings_set("theme", theme.mode(), save=False)
+        except Exception:
+            pass
+        try:
+            self._settings_set("last_url", self._entry_text(self.link_entry), save=False)
+        except Exception:
+            pass
+        try:
+            self._settings_set("download_dir", self._dir_text(), save=False)
+            self._settings_set("max_threads", self._threads_value(), save=False)
+            self._settings_set("gap_seconds", self._gap_value(), save=False)
+            self._settings_set("speed_limit_kbps", self._speed_limit_value(), save=False)
+        except Exception:
+            pass
+        try:
+            self._settings_set("finish_action", self._finish_action(), save=False)
+            self._settings_set("auto_folder", bool(self.auto_folder_var.get()),
+                               save=False)
+            self._settings_set("include_subfolders", bool(self.subfolder_var.get()),
+                               save=False)
+            self._settings_set("autostart", bool(self.autostart_var.get()), save=False)
+        except Exception:
+            pass
+        try:
+            # 等 2 秒：mkstemp 那类会挂起的写法已经换掉了，正常写盘只要几毫秒；
+            # 真写不动（只读盘/被占）也最多等 2 秒就放弃，关窗不卡死。
+            self.settings_bridge.flush(2.0)
+        except Exception:
+            pass
+
     # -- 队列右键菜单与文件定位 ------------------------------------------
     def _task_for_iid(self, iid):
         if not iid:
@@ -2406,13 +4026,23 @@ class App(object):
         if task is not None:
             menu.add_command(label="在文件夹中显示",
                              command=lambda: self._reveal_task(task))
-            menu.add_command(
-                label="复制文件名",
-                command=lambda: self._copy_to_clipboard(getattr(task, "name", "")))
+            menu.add_command(label="复制文件名",
+                             command=lambda: self._copy_to_clipboard(
+                                 getattr(task, "name", "")))
+            menu.add_command(label="复制失败原因",
+                             command=lambda: self._copy_failure_reason(task))
+            menu.add_command(label="在浏览器中打开源页",
+                             command=lambda: self._open_task_url(task))
             if str(getattr(task, "status", "")) == "failed":
                 menu.add_separator()
                 menu.add_command(label="重试这个任务",
                                  command=lambda: self._retry_single(task))
+            menu.add_separator()
+            # 队列顺序就是引擎取任务的顺序，所以挪位置＝改下载先后
+            menu.add_command(label="上移一位",
+                             command=lambda: self._move_task(task, -1))
+            menu.add_command(label="置顶",
+                             command=lambda: self._move_task(task, -len(self._tasks) - 1))
             menu.add_separator()
         menu.add_command(label="打开下载文件夹", command=self._open_dir)
         try:
@@ -2424,12 +4054,20 @@ class App(object):
                 pass
 
     def _task_directory(self, task):
+        # 有「文件夹名子目录」时，effective_root() 才是真正的落盘根目录
+        root_dir = ""
         try:
-            root_dir = getattr(self.downloader, "download_dir", "") or ""
+            if self.downloader is not None:
+                root_dir = str(self.downloader.effective_root() or "")
         except Exception:
             root_dir = ""
         if not root_dir:
-            root_dir = self._entry_text(self.dir_entry)
+            try:
+                root_dir = getattr(self.downloader, "download_dir", "") or ""
+            except Exception:
+                root_dir = ""
+        if not root_dir:
+            root_dir = self._dir_text()
         folder = getattr(task, "folder", "") or ""
         if folder and root_dir:
             return os.path.join(root_dir, folder)
@@ -2604,7 +4242,7 @@ class App(object):
         return "background" if answer else "stop"
 
     def _shutdown(self):
-        for attr in ("_pump_id", "_tick_id"):
+        for attr in ("_pump_id", "_tick_id", "_filter_job", "_options_job"):
             after_id = getattr(self, attr, None)
             if after_id is not None:
                 try:
@@ -2612,6 +4250,11 @@ class App(object):
                 except Exception:
                     pass
                 setattr(self, attr, None)
+        # 先记界面状态，再关窗：geometry() 在 destroy 之后就读不到了
+        try:
+            self._save_ui_state()
+        except Exception:
+            pass
         try:
             if self.failures is not None:
                 self.failures.save()

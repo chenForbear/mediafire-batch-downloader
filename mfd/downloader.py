@@ -19,6 +19,7 @@
 import collections
 import hashlib
 import os
+import random
 import threading
 import time
 import traceback
@@ -28,12 +29,14 @@ from .failures import FailureBook, classify_failure
 from .storage import History
 from .util import (
     describe_write_error,
+    fit_full_path,
     fit_in_directory,
     human_size,
     human_time,
     pick_writable_fallback,
     probe_writable_dir,
     sanitize_filename,
+    warn_if_not_enough_space,
 )
 
 CHUNK_SIZE = 1024 * 1024  # 1 MB
@@ -118,6 +121,38 @@ class DownloadTask(object):
         return "<DownloadTask %s %s %d/%d>" % (self.name, self.status, self.downloaded, self.size)
 
 
+class _RateLimiter(object):
+    """全局下载限速器（所有线程共享一个实例，限制的是总带宽而不是每线程）。
+
+    做法是最朴素的「滑动窗口记账」：把本次窗口内发出的字节数累加起来，
+    和按目标速度应该花掉的时间比，超前了就睡一会儿。窗口每秒重置一次。
+    只在超过目标速度时睡，所以不限速（kbps<=0）时下载器根本不会创建这个对象，
+    连一个 if 判断都省掉。
+    """
+
+    def __init__(self, kbps):
+        self.bytes_per_second = max(0, int(kbps or 0)) * 1024
+        self._lock = threading.Lock()
+        self._window_start = time.time()
+        self._window_bytes = 0
+
+    def throttle(self, nbytes):
+        """按累计字节数决定要不要暂停当前线程，nbytes 是刚写入磁盘的字节数。"""
+        if self.bytes_per_second <= 0 or nbytes <= 0:
+            return
+        with self._lock:
+            self._window_bytes += nbytes
+            now = time.time()
+            elapsed = now - self._window_start
+            expected = self._window_bytes / float(self.bytes_per_second)
+            if expected > elapsed:
+                # 单次最多睡 0.5 秒：睡太久会让「停止」按钮反应变慢
+                time.sleep(min(expected - elapsed, 0.5))
+            if elapsed >= 1.0:
+                self._window_start = now
+                self._window_bytes = 0
+
+
 def _read_chunk(response, size):
     """优先用 ``read1``：有多少给多少，不会为了凑满 size 而把进度假死在 99%。
 
@@ -146,10 +181,18 @@ class Downloader(object):
     def __init__(self, download_dir, history=None, max_threads=2, gap_seconds=1.0,
                  on_event=None, max_retries=3, timeout=(15, 30), failures=None):
         self.download_dir = download_dir
+        # 集合目录名：用户选的是"父目录"，真正落盘的是父目录下以 MediaFire
+        # 文件夹名命名的子目录。空串表示不建子目录（老行为）。
+        self.collection_name = ""
         self.history = history if history is not None else History()
         self.max_threads = max(1, min(int(max_threads or 1), 8))
         self.gap_seconds = max(0.0, float(gap_seconds or 0.0))
         self.max_retries = max(0, int(max_retries))
+        # 限速：0 表示不限速。多线程共用同一个限速器，限制的是总带宽。
+        self.speed_limit_kbps = 0
+        self._rate_limiter = None
+        # 同名文件冲突策略：rename=自动改名（默认）/ overwrite=直接覆盖 / skip=跳过
+        self.conflict_policy = "rename"
         self.timeout = timeout
         # http_get 只接受单个超时值。元组的第二项是"读超时"，传给它；
         # 第一项是"连接超时"，由 socket 层与 probe 使用。不接上的话这个参数
@@ -215,12 +258,21 @@ class Downloader(object):
         """当前失败的 DownloadTask 列表（不含历史清单里已经不在队列的）。"""
         return [t for t in self.tasks if t.status == STATUS_FAILED]
 
-    def set_options(self, max_threads=None, gap_seconds=None):
+    def set_options(self, max_threads=None, gap_seconds=None, speed_limit_kbps=None,
+                    max_retries=None, conflict_policy=None):
         """运行前调整参数；已在运行时只影响后续新起的线程（不强杀现有线程）。"""
         if max_threads is not None:
             self.max_threads = max(1, min(int(max_threads or 1), 8))
         if gap_seconds is not None:
             self.gap_seconds = max(0.0, float(gap_seconds or 0.0))
+        if speed_limit_kbps is not None:
+            self.speed_limit_kbps = max(0, int(speed_limit_kbps or 0))
+            self._rate_limiter = (_RateLimiter(self.speed_limit_kbps)
+                                  if self.speed_limit_kbps > 0 else None)
+        if max_retries is not None:
+            self.max_retries = max(0, int(max_retries))
+        if conflict_policy is not None and conflict_policy in ("rename", "overwrite", "skip"):
+            self.conflict_policy = conflict_policy
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -285,8 +337,9 @@ class Downloader(object):
     def _file_already_on_disk(self, task):
         if not self.download_dir:
             return False
-        path = os.path.join(self.download_dir, task.folder, task.name) if task.folder \
-            else os.path.join(self.download_dir, task.name)
+        root = self._effective_root()
+        path = os.path.join(root, task.folder, task.name) if task.folder \
+            else os.path.join(root, task.name)
         try:
             if os.path.isfile(path):
                 if task.size <= 0:
@@ -295,6 +348,43 @@ class Downloader(object):
         except OSError:
             return False
         return False
+
+    def _effective_root(self):
+        """当前真正落盘的根目录 = 保存位置 +（可选）集合子目录。
+
+        为什么不直接把子目录拼进 ``download_dir``：用户随时可能改保存位置，
+        而"集合名"来自本次解析的 MediaFire 文件夹，两者是独立的两件事。
+        分开存，任何一个变了都能立刻算出正确的落盘路径。
+        """
+        if not self.collection_name:
+            return self.download_dir
+        return os.path.join(self.download_dir, self.collection_name)
+
+    def effective_root(self):
+        """供界面显示的"文件实际会存到哪里"。"""
+        return self._effective_root()
+
+    def set_collection_name(self, name):
+        """设置集合子目录名（一般是 MediaFire 文件夹的名字）。
+
+        传空串表示不建子目录。返回是否发生了变化。
+        """
+        cleaned = sanitize_filename((name or "").strip(), "")
+        if not cleaned:
+            cleaned = ""
+        # 清洗后可能只剩点或空格，这种也别用它当目录名
+        if cleaned.strip(". ") == "":
+            cleaned = ""
+        if cleaned == self.collection_name:
+            return False
+        self.collection_name = cleaned
+        self._writable_cache.clear()
+        self.last_error = ""
+        if cleaned:
+            self._log("文件会存到子文件夹：%s" % cleaned)
+        else:
+            self._log("不建子文件夹，直接存到保存位置。")
+        return True
 
     def set_download_dir(self, directory):
         """换保存目录。
@@ -352,6 +442,18 @@ class Downloader(object):
             self._log("    想换回自己的目录：在界面上改好后直接点「开始下载」。")
             self.download_dir = fallback
             writable = True
+
+        # 磁盘余量预检：不够就现在说清楚，而不是下到一半才报「磁盘空间不足」。
+        # 一堆 150MB 的压缩包加起来能吃掉几个 G，进队列时不看，中途才发现就白下了。
+        try:
+            needed = sum(max(0, (t.size or 0) - t.downloaded) for t in pending)
+            if needed > 0:
+                warning = warn_if_not_enough_space(self.download_dir, needed)
+                if warning:
+                    self._log("WARN %s" % warning)
+        except Exception:
+            # 空间探测失败不该阻止下载（网络盘、权限受限都可能取不到）
+            pass
 
 
         self._stop_flag.clear()
@@ -531,19 +633,19 @@ class Downloader(object):
         task.error = ""
         self._emit("task", task)
 
-        target_dir = self.download_dir
+        target_dir = self._effective_root()
         if task.folder:
             # 子文件夹结构按 MediaFire 里的层级还原；目录名已净化过
-            target_dir = os.path.join(self.download_dir, *[
+            target_dir = os.path.join(target_dir, *[
                 sanitize_filename(part, "subfolder")
                 for part in task.folder.split("/") if part
             ])
-            try:
-                os.makedirs(target_dir, exist_ok=True)
-            except OSError as exc:
-                self._fail(task, "无法创建目录 %s：%s" % (target_dir, exc),
-                           detail=repr(exc), exc=exc)
-                return
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except OSError as exc:
+            self._fail(task, "无法创建目录 %s：%s" % (target_dir, exc),
+                       detail=repr(exc), exc=exc)
+            return
 
         # 子目录也要确认能写：makedirs 对"已存在但只读"的目录不报错，
         # 否则要等到 open(.part) 才炸，报出来的只有一串路径
@@ -561,6 +663,14 @@ class Downloader(object):
             return
 
         final_path, final_name = fit_in_directory(target_dir, task.name)
+        # 路径总长兜底：Windows 传统 API 上限 259 字符（260 含结尾的 NUL）。
+        # 日文/中文长文件名配深目录很容易顶到上限，那时建文件会报「文件名太长」，
+        # 用户看到的就是一个莫名其妙的失败。这里提前把名字缩短并保留扩展名。
+        safe_name, length_note = fit_full_path(target_dir, final_name)
+        if length_note:
+            self._log("文件名过长，自动缩短：%s → %s（%s）" % (final_name, safe_name, length_note))
+            final_name = safe_name
+            final_path = os.path.join(target_dir, final_name)
         part_path = final_path + PART_SUFFIX
 
         # 目录里已有同名同大小的文件 → 直接视为完成，不再重复下载
@@ -578,9 +688,18 @@ class Downloader(object):
                 self._log("已存在同大小文件，跳过：%s" % final_name)
                 self._emit("task", task)
                 return
-            # 同名但大小不同：改名保存，绝不覆盖用户已有文件
-            final_path, final_name = self._avoid_overwrite(target_dir, final_name)
-            part_path = final_path + PART_SUFFIX
+            # 同名但大小不同：按用户选的冲突策略处理（默认改名，绝不覆盖已有文件）
+            if self.conflict_policy == "skip":
+                task.status = STATUS_SKIPPED
+                task.saved_path = final_path
+                self._log("已存在同名文件，按「跳过」策略不再下载：%s" % final_name)
+                self._emit("task", task)
+                return
+            if self.conflict_policy == "overwrite":
+                self._log("已存在同名文件，按「覆盖」策略重新下载：%s" % final_name)
+            else:
+                final_path, final_name = self._avoid_overwrite(target_dir, final_name)
+                part_path = final_path + PART_SUFFIX
 
         ok = self._download_with_retry(task, final_path, part_path)
         if ok:
@@ -631,7 +750,9 @@ class Downloader(object):
                 task.error = "用户停止，已保留断点文件"
                 return False
             if attempt <= self.max_retries:
-                wait = min(2 ** attempt, 30)
+                # 指数退避 + 抖动：多个任务同时失败时不要在同一秒一起重连
+                # （对服务器和本机网络都是二次冲击，也容易被判成异常流量）
+                wait = min(2 ** attempt, 30) + random.uniform(0, 0.75)
                 self._log("失败（%s），%d 秒后重试 —— %s" % (last_error, wait, task.name))
                 if last_detail:
                     self._log("    技术细节：%s" % str(last_detail).replace("\n", " ")[:300])
@@ -731,6 +852,17 @@ class Downloader(object):
             status = getattr(response, "status", 200)
             content_length = int(response.headers.get("Content-Length") or 0)
             content_range = response.headers.get("Content-Range") or ""
+            if status == 416:
+                # Range 越界：断点文件比远端大（源文件被换过），或服务器不认这个区间。
+                # 删掉断点重下是最稳的做法——硬拼下去只会得到一个损坏文件。
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
+                raise mediafire.MediaFireError(
+                    "服务器拒绝续传区间（416），已删除断点，将重新下载：%s" % task.name,
+                    "http 416 on %s" % direct_url,
+                )
             if resume_from and status != 206:
                 # 服务器忽略了 Range：删除断点重下，避免拼出损坏文件
                 self._log("服务器不支持续传，改为重新下载：%s" % task.name)
@@ -756,8 +888,15 @@ class Downloader(object):
             downloaded_this_run = 0
             start = time.time()
             last_report = start
+            # 顺带增量计算 SHA-256：从头下载时边写边算，省掉下载完成后再把整个
+            # 文件读一遍的开销（一个 153MB 的文件能少一次全盘读）。
+            # 续传时无法增量（前面那段字节已经过去了），退回完成后读文件计算。
+            digest = hashlib.sha256()
+            incremental_hash = (resume_from == 0)
 
-            with open(part_path, mode) as handle:
+            # 缓冲区给到 1MB：默认 8KB 时每个 chunk 要触发上百次 write 系统调用，
+            # 在机械盘和同步盘（OneDrive）上差别很明显。
+            with open(part_path, mode, buffering=CHUNK_SIZE) as handle:
                 while True:
                     if self._stop_flag.is_set():
                         raise _Canceled()
@@ -766,8 +905,12 @@ class Downloader(object):
                     if not chunk:
                         break
                     handle.write(chunk)
+                    if incremental_hash:
+                        digest.update(chunk)
                     task.downloaded += len(chunk)
                     downloaded_this_run += len(chunk)
+                    if self._rate_limiter is not None:
+                        self._rate_limiter.throttle(len(chunk))
                     now = time.time()
                     if now - last_report >= 0.5:
                         elapsed = now - start
@@ -802,15 +945,16 @@ class Downloader(object):
         # 这是比"大小对不对"硬得多的证据（大小只说明长度，哈希能证明内容一致）。
         # 相符才落盘；不符按失败处理，下次运行会重新下载而不是留下一个坏文件。
         if task.hash_value:
-            digest = self._sha256_of(part_path)
-            if digest != task.hash_value:
+            got = (digest.hexdigest().upper() if incremental_hash
+                   else self._sha256_of(part_path))
+            if got != task.hash_value:
                 try:
                     os.remove(part_path)
                 except OSError:
                     pass
                 raise mediafire.MediaFireError(
                     "文件校验不通过，已删除并会重新下载：%s" % task.name,
-                    "sha256 mismatch: got %s want %s" % (digest, task.hash_value),
+                    "sha256 mismatch: got %s want %s" % (got, task.hash_value),
                 )
             self._log("校验通过（SHA-256）：%s" % task.name)
 

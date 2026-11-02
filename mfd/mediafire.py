@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """MediaFire 交互层：解析文件夹、拿直链、取文件信息。
 
-只用标准库（``urllib`` / ``json`` / ``re`` / ``html``）。旧版用 ``requests`` +
-``BeautifulSoup`` + ``chardet``，其中 ``chardet`` 从未被调用，``bs4`` 只为了取一个
-属性；换成标准库后包体大幅缩小，也少三个可能出兼容问题的 C 扩展。
+只用标准库（``urllib`` / ``json`` / ``re`` / ``html`` / ``concurrent.futures``）。
+旧版用 ``requests`` + ``BeautifulSoup`` + ``chardet``，其中 ``chardet`` 从未被调用，
+``bs4`` 只为了取一个属性；换成标准库后包体大幅缩小，也少三个可能出兼容问题的
+C 扩展。子文件夹的并发解析用的是标准库的 ``concurrent.futures``，没有引入任何
+第三方依赖。
 
 所有对外函数在失败时抛 ``MediaFireError``，并同时携带：
   * ``user_message``：给普通用户看的中文说明（GUI 直接显示这一条）
@@ -13,15 +15,18 @@
 这是最影响可用性的缺陷。
 """
 
+import concurrent.futures
 import json
 import re
 import socket
 import ssl
+import threading
 import time
 from html import unescape
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
+from urllib.request import (HTTPRedirectHandler, HTTPSHandler, Request,
+                            build_opener)
 
 from . import __version__
 from .util import human_size, sanitize_filename
@@ -37,6 +42,14 @@ READ_TIMEOUT = 30
 # 读响应体失败时的重试次数（实测走代理访问 mediafire 时偶发读超时）
 READ_RETRIES = 3
 API_BASE = "https://www.mediafire.com/api/1.4"
+
+# 同一层子文件夹并发拉取的线程数。4 是折中值：1 路太慢（每个子目录都要一次
+# 完整 HTTP 往返，200 个子目录实测 5 分钟以上），8 路以上 MediaFire 会开始回 429。
+FOLDER_WORKERS = 4
+# 单个请求最多自己跟几跳重定向（MediaFire 的 CDN 直链经常给 302/308）
+MAX_REDIRECTS = 5
+# 需要我们自己跟的 3xx 状态码（urllib 原生只认 301/302/303/307，不认 308）
+REDIRECT_CODES = (301, 302, 303, 307, 308)
 
 # 文件夹 API 返回的状态码含义（error 字段）
 API_ERROR_MEANING = {
@@ -81,13 +94,99 @@ def _build_ssl_context():
 
 
 _SSL_CONTEXT = None
+# 子文件夹改成并发解析后，多个工作线程会同时走到懒加载这里。不加锁也不会崩，
+# 但会各自构造一个 SSL 上下文、把系统证书库重复加载一遍（Win7 上实测几百毫秒）；
+# 加一把锁只需一次。
+#
+# 用**可重入**锁是防呆：这把锁有两处使用者（``get_ssl_context`` 与
+# ``_get_opener``），一旦有人在持锁期间又调了另一个函数，普通 ``Lock`` 会当场
+# 自锁——2026-11-02 实测现象是进程卡死在第一跳重定向上、连 socket 超时都不成立，
+# 只能杀进程。``_get_opener`` 那边已经改成"先取上下文再上锁"，不依赖重入；
+# 这里再用 ``RLock``，等于同一个坑上放两道保险。
+_SSL_LOCK = threading.RLock()
 
 
 def get_ssl_context():
     global _SSL_CONTEXT
     if _SSL_CONTEXT is None:
-        _SSL_CONTEXT = _build_ssl_context()
+        with _SSL_LOCK:
+            if _SSL_CONTEXT is None:
+                _SSL_CONTEXT = _build_ssl_context()
     return _SSL_CONTEXT
+
+
+class _NoAutoRedirect(HTTPRedirectHandler):
+    """把 urllib 自带的"自动跟重定向"关掉。
+
+    ``urlopen`` 默认会自己跟 301/302/303/307（最多 10 跳），但**不认 308**，
+    而且它跟到第 11 跳时抛的 ``HTTPError`` 里带着 ``Location``，外面再套一层跟随
+    就会变成"每层跟 10 跳、外层再来 5 轮"，实际跳数远超我们承诺的上限
+    （实测：一个自指的重定向能把请求打到 30 次）。
+
+    所以这里干脆让 urllib 一跳都不跟、一律抛 ``HTTPError``，转由 :func:`_open_url`
+    逐跳推进——这样"最多 5 跳"才是真的 5 跳，308 也就自然被覆盖到了。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """返回 ``None`` = 不构造新的请求，让 urllib 按错误抛上来。"""
+        return None
+
+
+_OPENER = None
+
+
+def _get_opener():
+    """懒加载一个"不自动跟重定向"的 opener（SSL 上下文复用 ``get_ssl_context``）。
+
+    写法上坚持**先取上下文、再上锁**：虽然 ``_SSL_LOCK`` 现在已经是 ``RLock``，
+    但让锁里只包一句赋值，就不用指望"锁是可重入的"这个隐含前提——2026-11-02
+    吃过一次亏，持锁再调 ``get_ssl_context()`` 时进程直接卡死在第一跳重定向上，
+    连 socket 超时都不成立，只能杀进程。
+    """
+    global _OPENER
+    if _OPENER is None:
+        context = get_ssl_context()
+        with _SSL_LOCK:
+            if _OPENER is None:
+                _OPENER = build_opener(
+                    _NoAutoRedirect(),
+                    HTTPSHandler(context=context),
+                )
+    return _OPENER
+
+
+def _open_url(url, headers, timeout_value):
+    """发 GET 并返回响应对象；重定向由本函数自己一跳一跳跟着走。
+
+    为什么要自己跟：``urllib`` 自带的处理会跟 301/302/303/307，但 **不认 308**
+    （Python 3.8 的 ``HTTPRedirectHandler`` 里没有 ``http_error_308``），而 MediaFire
+    的 CDN 直链实测会用 302/308 把人往别的域上带。遇到 308 时旧代码会把它翻译成
+    "直链已过期或被拦截"，用户看到的现象就是"解析得好好的，下载却莫名失败"。
+
+    规则：3xx 且带 ``Location`` 就继续走（相对地址用 ``urllib.parse.urljoin`` 补齐，
+    实测见过 ``Location: /ab12/x.zip`` 这种写法），最多 ``MAX_REDIRECTS`` 跳；
+    超过就把最后一个 ``HTTPError`` 原样抛出，交给调用方按普通 HTTP 错误处理。
+    """
+    current = url
+    hop = 0
+    while True:
+        request = Request(current, headers=headers, method="GET")
+        try:
+            return _get_opener().open(request, timeout=timeout_value)
+        except HTTPError as exc:
+            location = ""
+            if exc.headers is not None:
+                location = exc.headers.get("Location") or ""
+            if exc.code in REDIRECT_CODES and location.strip() and hop < MAX_REDIRECTS:
+                # 这一跳不打算交给调用方，先把它自己的响应体关掉，免得泄漏连接
+                try:
+                    exc.close()
+                except Exception:
+                    pass
+                hop += 1
+                current = urljoin(current, location.strip())
+                continue
+            raise
 
 
 def http_get(url, headers=None, timeout=None, stream=False, read_retries=READ_RETRIES):
@@ -101,6 +200,9 @@ def http_get(url, headers=None, timeout=None, stream=False, read_retries=READ_RE
     ``socket.timeout``（走代理访问 MediaFire 时接口响应慢、分块读取中途停住）。
     旧写法只对"建立连接"做了 try，读正文这一步失败就直接抛给用户，表现是
     "解析着解析着报网络超时"。现在读失败会自动重连重读，最多 3 次。
+
+    重定向由 :func:`_open_url` 负责跟着走（含 urllib 原生不支持的 308，
+    以及相对 ``Location``），最多 ``MAX_REDIRECTS`` 跳。
     """
     all_headers = {
         "User-Agent": DEFAULT_USER_AGENT,
@@ -110,10 +212,9 @@ def http_get(url, headers=None, timeout=None, stream=False, read_retries=READ_RE
     if headers:
         all_headers.update(headers)
 
-    req = Request(url, headers=all_headers, method="GET")
     timeout_value = timeout or READ_TIMEOUT
     try:
-        resp = urlopen(req, timeout=timeout_value, context=get_ssl_context())
+        resp = _open_url(url, all_headers, timeout_value)
     except HTTPError as exc:
         # MediaFire 的接口在参数不合法时返回 HTTP 400，但正文里带着 error 码
         # （实测：error=129）。这个正文比"HTTP 400"有用得多，所以先读出来。
@@ -394,28 +495,101 @@ def list_folder_files(folder_key, include_subfolders=True, on_progress=None):
     旧版只取第一页、且完全不看子文件夹（``more_chunks`` 与 ``folders`` 两个
     字段根本没被读取），这是旧工具最实质的功能缺陷。
 
+    **遍历顺序**：逐层广度优先。结果顺序 == "根目录文件 → 第一层各子文件夹
+    （按接口给出顺序）的文件 → 第二层 ……"，与本地文件夹树的阅读顺序一致，
+    也是旧串行版本的行为，界面的排序、断点续传都对得上。
+
+    **并发**：同一层的子文件夹交给 ``FOLDER_WORKERS`` 个线程同时拉（每个子文件夹
+    一次 HTTP 往返，串行时层数一多就成倍变慢）。回收时**按提交顺序取 result**，
+    所以哪怕 B 文件夹先拉完，结果里 B 也不会跑到 A 前面——并发不改变输出顺序。
+    只有一个文件夹时不开线程池，与旧版完全同码。
+
+    **进度回调的语义变了**：``on_progress`` 现在拿到的是**累计已解析的文件数**
+    （以前是"当前这个文件夹内已翻到多少"）。并发时不可能让每个线程各自回调一次，
+    否则界面上的数字会来回跳；改成每层收完在主线程回调一次，数字只增不减。
+
     若该 key 实际指向单个文件，会抛 ``MediaFireError``（detail 里含 ``error=129``）；
     调用方应改用 :func:`single_file_item`。
     """
     collected = []
     visited = set()
-    queue = [(folder_key, "")]
-    while queue:
-        key, prefix = queue.pop(0)
-        if key in visited:
-            continue
-        visited.add(key)
+    level = [(folder_key, "")]
+    while level:
+        # 先按出现顺序去重再发请求：同一层里两个文件夹指向同一个子文件夹时只拉一次
+        batch = []
+        for key, prefix in level:
+            if key in visited:
+                continue
+            visited.add(key)
+            batch.append((key, prefix))
+        if not batch:
+            break
 
-        files, subfolders = _fetch_folder_page(key, prefix, on_progress)
-        collected.extend(files)
-        if include_subfolders:
-            for sub_key, sub_prefix in subfolders:
-                if sub_key not in visited:
-                    queue.append((sub_key, sub_prefix))
+        if len(batch) == 1:
+            # 最常见的一条路径（只有一个根目录 / 只有一个子文件夹）：不建线程池
+            key, prefix = batch[0]
+            progress = _offset_progress(on_progress, len(collected))
+            results = [_fetch_folder_page(key, prefix, progress, include_subfolders)]
+        else:
+            results = _fetch_level(batch, include_subfolders)
+
+        next_level = []
+        for files, subfolders in results:
+            collected.extend(files)
+            if include_subfolders:
+                next_level.extend(subfolders)
+        if on_progress:
+            on_progress(len(collected))
+        level = next_level
     return collected
 
 
-def _fetch_folder_page(folder_key, prefix, on_progress=None):
+def _offset_progress(callback, base):
+    """把"这个文件夹里已取多少"的回调，包成"整体已取多少"的回调。
+
+    ``_fetch_folder_page`` 只知道自己翻了几个 chunk；界面要的是全局进度，
+    所以在这里把基数加上去。没有回调时返回 ``None``（也让下游少一层判断）。
+    """
+    if not callback:
+        return None
+
+    def report(count):
+        callback(base + count)
+
+    return report
+
+
+def _fetch_level(batch, want_subfolders=True):
+    """并发拉取同一层的多个文件夹，返回与 ``batch`` **同序**的 (files, subfolders)。
+
+    顺序稳定的关键在于：``as_completed`` 拿到的是"谁先好"，不是"谁排前面"，
+    所以用 ``future -> 下标`` 的映射把结果写回原来的坑位，最后按数组顺序返回。
+    失败的那个不能当作空结果——串行版本会直接抛出去，并发版也必须抛，
+    否则"少了几个文件夹的文件"这种错会被静默吞掉。多个同时失败时抛下标最小的
+    那个，跟串行时先走到谁就抛谁一致。
+    """
+    results = [None] * len(batch)
+    failure = None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=FOLDER_WORKERS) as pool:
+        futures = {}
+        for index, (key, prefix) in enumerate(batch):
+            # 各线程内的翻页进度不单独上报：并发回调会让界面数字乱跳，
+            # 由 list_folder_files 在每层收完后统一报一次
+            futures[pool.submit(_fetch_folder_page, key, prefix, None,
+                                want_subfolders)] = index
+        for future in concurrent.futures.as_completed(futures):
+            index = futures[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:  # noqa: BLE001 —— 原样重抛，这里只是记下
+                if failure is None or index < failure[0]:
+                    failure = (index, exc)
+    if failure is not None:
+        raise failure[1]
+    return results
+
+
+def _fetch_folder_page(folder_key, prefix, on_progress=None, want_subfolders=True):
     """翻页取完一个文件夹的全部文件；同时返回其中的子文件夹。"""
     files = []
     subfolder_count = 0
@@ -459,9 +633,9 @@ def _fetch_folder_page(folder_key, prefix, on_progress=None):
             break
 
     subfolders = []
-    # 刚才那次 files 请求的返回里已经带了 folder_count；为 0 就不必再问一次
-    # （实测：省掉这一趟可把单个文件夹的解析时间从 11.5 秒降到约 7 秒）
-    if subfolder_count <= 0:
+    # 调用方明确说"不要子文件夹"时，连这一趟都别发——不然白花一个 HTTP 往返，
+    # 结果拿回来还要被上层丢掉（深目录树上这能省掉成百次无用请求）。
+    if subfolder_count <= 0 or not want_subfolders:
         return files, subfolders
     params = {"content_type": "folders", "folder_key": folder_key, "chunk": 1, "chunk_size": 100}
     try:
@@ -500,6 +674,90 @@ def get_file_info(quick_key):
         # 实测 file/get_info 也返回官方 SHA-256（字段名 hash）
         "hash": (info.get("hash") or "").strip().upper(),
     }
+
+
+# --------------------------------------------------------------------------
+# 文件夹显示名（"自动以文件夹名建子目录"要靠它）
+# --------------------------------------------------------------------------
+
+def _url_folder_name(url):
+    """从 URL 路径里取出 ``/folder/<key>/<名称>`` 的名称原文；没有就返回空串。
+
+    只做切分与 ``unquote``，**不清洗**——是否可用交给 ``sanitize_filename`` 判。
+    先 ``urlparse`` 再按 ``/`` 切，这样"带查询参数""带末尾斜杠""大小写混写"
+    （``/Folder/``）、以及没写协议头的 ``www.mediafire.com/folder/...``
+    都能走通，不用写五六个正则。
+    """
+    text = (url or "").strip()
+    if not text:
+        return ""
+    path = urlparse(text).path or ""
+    segments = [part for part in path.split("/") if part]
+    for index, part in enumerate(segments):
+        if part.lower() == "folder" and index + 1 < len(segments):
+            # 第三段才是名字；只有两段说明这条链接只带了 key
+            if index + 2 < len(segments):
+                return unquote(segments[index + 2])
+            return ""
+    return ""
+
+
+def folder_display_name(url, folder_key=""):
+    """尽力拿到这个 MediaFire 文件夹的人类可读名字，取不到就返回空串。
+
+    优先级：
+      1. 链接自带的 ``/folder/<key>/<名称>``。分享链接通常会把文件夹名拼在末尾
+         （``%5B...%5D`` 这类转义解码后就是原样），这一步不发请求、不会失败；
+      2. 链接里没有名字时问 ``folder/get_info``，读 ``response.folder_info.name``。
+         多一次 HTTP 往返，换来的是"只有 key 的短链接也能按名字建目录"；
+      3. 都不行返回空串，调用方据此退回"不建子目录"。
+
+    名字会先过 :func:`mfd.util.sanitize_filename`：下一步经常直接拿它当目录名，
+    而 Windows 不允许 ``:`` ``?`` 这些字符。
+
+    **本函数不抛异常**——"拿不到名字"是正常分支（链接里没有、接口抽风、key 失效），
+    不该让整个下载流程中断。
+    """
+    raw = _url_folder_name(url)
+    if raw:
+        name = sanitize_filename(raw, "")
+        if name:
+            return name
+
+    key = (folder_key or "").strip()
+    if not key:
+        try:
+            key = extract_folder_key(url)
+        except MediaFireError:
+            key = ""
+    if not key:
+        return ""
+
+    try:
+        response = _api_get("folder/get_info", {"folder_key": key})
+        info = (response or {}).get("folder_info") or {}
+        name = info.get("name") or ""
+        return sanitize_filename(str(name), "") if name else ""
+    except Exception:
+        # 网络抖动、接口改版、key 无效……都只是"拿不到名字"，吞掉即可
+        return ""
+
+
+def resolve_folder_meta(url):
+    """界面层的便捷入口：一次拿到 ``{'name': 显示名, 'key': folder key}``。
+
+    ``resolve_link`` 的返回值（``(items, description)``）被下载器、界面和历史
+    记录多处依赖，不能为了带出一个文件夹名去改它的签名；想要"以文件夹名建子目录"
+    的调用方走这里，一次拿两样。
+
+    链接不是 MediaFire、或识别不出 key 时两个字段都返回空串，**不抛异常**。
+    """
+    key = ""
+    try:
+        key = extract_folder_key(url)
+    except MediaFireError:
+        key = ""
+    return {"name": folder_display_name(url, key), "key": key}
 
 
 # --------------------------------------------------------------------------

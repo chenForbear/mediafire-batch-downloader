@@ -122,10 +122,11 @@ class JsonFileStore(object):
         directory = os.path.dirname(self.path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        # 先写临时文件再原子替换，避免断电/崩溃留下半截 JSON
-        fd, tmp_path = tempfile.mkstemp(prefix=".mfd_hist_", dir=directory or None)
+        # 先写临时文件再原子替换，避免断电/崩溃留下半截 JSON。
+        # 不用 tempfile.mkstemp：它在受限令牌下会长时间挂起而不是快速报错。
+        tmp_path = "%s.%d.tmp" % (self.path, os.getpid())
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with open(tmp_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=1)
             os.replace(tmp_path, self.path)
         except OSError:

@@ -12,8 +12,11 @@
 本模块不发起任何网络请求，纯函数，便于单元测试。
 """
 
+import hashlib
+import math
 import os
 import re
+import shutil
 
 try:  # Python 3.8+
     import unicodedata
@@ -25,11 +28,13 @@ except ImportError:  # pragma: no cover - 理论上不可能
 INVALID_FILENAME_CHARS = '<>:"/\\|?*'
 
 # Windows 设备名：即使带扩展名也不能用作文件名
-RESERVED_NAMES = {
-    "CON", "PRN", "AUX", "NUL",
-    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-}
+# （``CON.txt`` / ``aux.zip`` / ``Com1`` 在资源管理器里看着正常，
+#   实际会被系统当成设备，写入时不是失败就是写到别处去。）
+RESERVED_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + ["COM%d" % i for i in range(1, 10)]
+    + ["LPT%d" % i for i in range(1, 10)]
+)
 
 # 单个文件名长度上限。Windows 单文件名为 255 字符（UTF-16 码元），
 # 这里留出余量，因为还要拼接目录和 ".part" 临时后缀。
@@ -38,6 +43,42 @@ MAX_FILENAME_LENGTH = 180
 # 完整路径长度上限。理论上 Win10 1607+ 可用长路径，但需要注册表开关，
 # 而 Win7 完全没有；保守按 259 字符（MAX_PATH-1）控制。
 MAX_FULL_PATH_LENGTH = 255
+
+# Windows 传统路径上限：260 个字符，其中最后一位要留给结尾的 NUL，
+# 真正可用的路径长度是 259。这里不打算加 ``\\?\`` 长路径前缀——那会破坏
+# 资源管理器里的双击行为，也会让现在的相对路径逻辑全部失效。
+MAX_PATH = 259
+
+# fit_full_path 压缩超长文件名时追加的短哈希长度（十六进制字符数）。
+SHORT_HASH_LENGTH = 8
+
+
+def is_reserved_name(name):
+    """判断文件名主干是不是 Windows 保留设备名（大小写不敏感，带扩展名也算）。
+
+    ``CON`` / ``con.txt`` / ``aux.zip`` / ``Com1`` / ``CON.tar.gz`` 全部算保留：
+    Windows 认的是**第一个点之前**的那一段，后面的 ``.txt``、``.tar.gz`` 不影响
+    它仍然指向设备。反过来 ``x.CON``（设备名在扩展名位置）是普通文件，返回 False。
+
+    输入为空、非字符串时返回 False——调用方不必先判断类型。
+    """
+    if not name or not isinstance(name, str):
+        return False
+    # 只取第一个点之前的部分，并去掉尾部空格（Windows 把 "CON .txt" 也当 CON）
+    head = name.split(".", 1)[0].rstrip(" ").strip()
+    return head.upper() in RESERVED_NAMES
+
+
+def _short_hash(text, length=SHORT_HASH_LENGTH):
+    """取一段稳定短哈希。
+
+    用原文（而不是截断后的名字）做输入：这样两个前缀相同、尾部不同的超长
+    文件名会得到不同的哈希，落在同一个目录里不会互相覆盖；同一个名字反复
+    计算的结果完全一致，续传时还能找回自己那个 ``.part``。
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:length]
 
 
 def sanitize_filename(name, fallback="unknown_file"):
@@ -49,7 +90,7 @@ def sanitize_filename(name, fallback="unknown_file"):
     if not name:
         return fallback
 
-    # 1) 去掉路径分隔与控制字符
+    # 1) 去掉路径分隔与控制字符（0x00-0x1F）
     cleaned = []
     for ch in name:
         if ch in INVALID_FILENAME_CHARS or ch == "\x00":
@@ -60,24 +101,32 @@ def sanitize_filename(name, fallback="unknown_file"):
             cleaned.append(ch)
     name = "".join(cleaned)
 
-    # 2) 去掉首尾的空白与点（Windows 不允许文件名以点或空格结尾）
-    name = name.strip().strip(".").strip()
+    # 2) 去掉首尾的空格与点。Windows 会**静默**去掉结尾的空格和点，
+    #    如果这里不清，记录里的名字和实际落盘的名字就会对不上，续传时
+    #    会去找一个根本不存在的文件。用字符集 strip 而不是"先空格后点"，
+    #    是为了处理 "name. ." 这种交替结尾（旧写法会漏掉最后那个点）。
+    name = name.strip(" .")
 
     # 3) 折叠连续空白，避免出现怪异的多个空格
     name = re.sub(r"\s+", " ", name)
 
+    # 折叠可能把 Unicode 空白换成半角空格，落回结尾，所以再清一次首尾
+    name = name.strip(" .")
+
     if not name:
         return fallback
 
-    # 4) 拆分主名与扩展名，分别做长度与保留名校验
+    # 4) 命中 Windows 保留设备名时，在设备名后加下划线：CON.zip → CON_.zip
+    if is_reserved_name(name):
+        device = name.split(".", 1)[0]
+        name = device.rstrip(" ") + "_" + name[len(device):]
+
+    # 5) 拆分主名与扩展名，做长度截断
     stem, ext = os.path.splitext(name)
     if not stem:
         stem, ext = name, ""
 
-    if stem.upper() in RESERVED_NAMES:
-        stem = stem + "_"
-
-    # 5) 超长时截断主名（保留扩展名，扩展名本身过长则一并截断）
+    # 超长时截断主名（保留扩展名，扩展名本身过长则一并截断）
     budget = MAX_FILENAME_LENGTH - len(ext)
     if budget < 16:  # 扩展名异常长，整体截断
         stem, ext = name[: MAX_FILENAME_LENGTH - 8], ""
@@ -109,6 +158,136 @@ def fit_in_directory(directory, filename, suffix=""):
     return os.path.join(directory, final + suffix), final + suffix
 
 
+def fit_full_path(directory, filename, max_path=MAX_PATH):
+    """把目录 + 文件名压到 Windows 路径上限以内。
+
+    返回 ``(filename, note)``：``note`` 是给日志看的一句话，没截断时为空串。
+    策略：先按现有 ``fit_in_directory`` 压缩文件名主干；仍超长时，保留扩展名，
+    把主干截到"剩余长度-9"，再拼一段 8 位短哈希（重复下载同名长文件时不会
+    互相覆盖）。
+
+    为什么不在名字里加 ``\\\\?\\`` 前缀：那能突破 260 限制，但会让资源管理器、
+    资源管理器里双击打开、以及项目里所有"相对路径"逻辑全部变形。宁可把名字
+    压短并明确告诉用户，也不引入一把只在部分机器上成立的钥匙。
+
+    目录本身就已经吃满上限时（剩余空间为负），返回尽量短的名字（至少保住
+    扩展名），并在 ``note`` 里建议把保存位置换到更浅的目录。
+    """
+    if not filename:
+        filename = "unknown_file"
+    directory = directory or "."
+
+    # 0) 没超长就一个字都不动——调用方拿到的必须是原始名字
+    if len(os.path.abspath(os.path.join(directory, filename))) <= max_path:
+        return filename, ""
+
+    # 1) 第一道：先走现成的目录内压缩（纯截断，不带哈希）
+    #    它按旧上限 255 工作，先试它，能让"只差一点点"的名字保住原样
+    _full, legacy_final = fit_in_directory(directory, filename)
+
+    # 2) 仍然要压缩：保留扩展名 + 截断主干 + 8 位短哈希。
+    #    为什么哪怕老办法已经压得进去，也还是要加哈希——纯截断会让两个前缀
+    #    相同、尾部不同的长文件落到同一个名字上，后者静默覆盖前者。哈希取自
+    #    原始全名，既保证不同名不同名，也保证同一个名字每次算出来一致（续传
+    #    时还能找回自己那个 .part）。
+    stem, ext = os.path.splitext(filename)
+    if not stem:
+        stem, ext = filename, ""
+
+    directory_length = len(os.path.abspath(directory))
+    # room：目录 + 分隔符之后，还能放多少个字符（含扩展名）
+    room = max_path - directory_length - 1
+
+    if room <= len(ext) + 2:
+        # 目录自己就快顶到上限了，再怎么改文件名也救不回来
+        shortest = ("f" + ext) if ext else "f"
+        note = ("目录本身已接近路径上限，建议把保存位置换到更浅的目录"
+                "（%s 已有 %d 个字符，上限 %d）"
+                % (os.path.abspath(directory), directory_length, max_path))
+        return shortest, note
+
+    room_for_name = room - len(ext)
+    original_full = os.path.join(directory, filename)
+    truncated_note = ""
+    if room_for_name >= SHORT_HASH_LENGTH + 3:
+        # 9 = 1 个下划线 + 8 位哈希；主干至少留 2 个字符，太短就没法认了
+        keep = room_for_name - SHORT_HASH_LENGTH - 1
+        head = stem[:keep].rstrip() or "f"
+        final = head + "_" + _short_hash(filename) + ext
+    else:
+        # 余量太少，连哈希都塞不下：退回老办法的纯截断，宁可有极小概率重名
+        # 也不让写入因为"名字太长"直接失败
+        keep = max(1, room_for_name)
+        head = stem[:keep].rstrip() or "f"
+        final = head + ext
+        if legacy_final and len(os.path.abspath(
+                os.path.join(directory, legacy_final))) <= max_path:
+            final = legacy_final
+        truncated_note = "（路径余量不足，哈希后缀已省略）"
+
+    note = ("文件名过长，已压缩为「%s」%s：%d 字符的路径放不进上限 %d"
+            % (final, truncated_note,
+               len(os.path.abspath(original_full)), max_path))
+    return final, note
+
+
+def disk_free_bytes(path):
+    """返回该路径所在卷的剩余字节数；取不到返回 -1。
+
+    路径不存在时**不**往上级目录找：调用方要的是一个"这个位置现在能不能写"
+    的确定答案，"猜一个相近的目录"会让日志里的数字与实际落盘位置不是同一块盘。
+    """
+    try:
+        target = path or "."
+        if not os.path.exists(target):
+            return -1
+        usage = getattr(shutil, "disk_usage", None)
+        if usage is not None:
+            return int(usage(target).free)
+        return _win_free_bytes(target)      # pragma: no cover - 3.3 以下才走这里
+    except Exception:
+        return -1
+
+
+def _win_free_bytes(path):                  # pragma: no cover - 仅作兜底
+    """Windows 兜底：直接问 GetDiskFreeSpaceExW。"""
+    import ctypes
+
+    free = ctypes.c_ulonglong(0)
+    ok = ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+        ctypes.c_wchar_p(os.path.abspath(path)), None, None, ctypes.byref(free))
+    if not ok:
+        return -1
+    return int(free.value)
+
+
+def warn_if_not_enough_space(directory, needed_bytes, reserve=200 * 1024 * 1024):
+    """剩余空间不够时返回一句中文提示，够就返回空串。``reserve`` 是给系统留的余量。
+
+    取不到剩余空间（``disk_free_bytes`` 返回 -1）时不提示——宁可不拦，也不
+    凭一个猜出来的数字劝用户清盘。
+    """
+    try:
+        needed = int(float(needed_bytes))
+    except (TypeError, ValueError):
+        return ""
+    if needed <= 0:
+        return ""
+    free = disk_free_bytes(directory)
+    if free < 0:
+        return ""
+    try:
+        reserve = max(0, int(reserve))
+    except (TypeError, ValueError):
+        reserve = 0
+    usable = free - reserve
+    if usable >= needed:
+        return ""
+    return ("磁盘剩余空间不够：本次还需要 %s，当前可用 %s（已为系统预留 %s）。"
+            "建议先清理磁盘，或把保存位置换到空间更大的分区。"
+            % (human_size(needed), human_size(max(0, usable)), human_size(reserve)))
+
+
 def human_size(num_bytes):
     """把字节数转成人类可读字符串，例如 ``153.3 MB``。"""
     try:
@@ -124,6 +303,27 @@ def human_size(num_bytes):
             return "%.1f %s" % (num_bytes, unit)
         num_bytes /= 1024.0
     return "未知"
+
+
+def human_speed(bytes_per_second):
+    """把字节/秒变成 ``'1.2 MB/s'``；``<=0`` 时返回 ``'-- KB/s'``（界面已有这个约定）。
+
+    速度还没算出来的那一刻（刚起任务、刚续传）传 0 进来，界面要显示占位符
+    而不是 ``0.0 B/s``——后者看着像"卡死"，前者才是"还没测到"。
+    """
+    try:
+        value = float(bytes_per_second)
+    except (TypeError, ValueError):
+        return "-- KB/s"
+    if math.isnan(value) or math.isinf(value) or value <= 0:
+        return "-- KB/s"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024.0 or unit == "TB":
+            if unit == "B":
+                return "%d B/s" % int(value)
+            return "%.1f %s/s" % (value, unit)
+        value /= 1024.0
+    return "-- KB/s"
 
 
 def human_time(seconds):

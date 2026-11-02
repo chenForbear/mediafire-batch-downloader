@@ -14,7 +14,7 @@
 
 | | |
 |---|---|
-| Version | `2.0.0` (2026-11-01) |
+| Version | `2.1.0` (2026-11-02) |
 | Platforms | Windows 7 SP1 / 8.1 / 10 / 11 |
 | Runtime | Python 3.8+ (the packaged .exe needs none) |
 | Third-party dependencies | **None.** Tkinter for the UI, standard library everywhere else |
@@ -47,28 +47,39 @@ A MediaFire folder page lets you click one file at a time. Two hundred files mea
 
 This tool does that whole loop in one pass:
 
-1. **Paste once, expand everything** — folder links are walked recursively (subfolders optional), pagination is followed to the end, and single-file links plus `?key=` short links are recognised automatically;
-2. **Queue without flooding the other side** — 1–8 worker threads, a configurable gap between files, exponential backoff on retries;
-3. **Resume instead of restart** — files are written to `.part` first and continue from the known offset;
-4. **Verify before calling it done** — SHA-256 recomputed locally against the value MediaFire reports; a mismatch is a failure, not a "completed" file;
-5. **Keep a ledger of failures** — 21 error categories land in a failure list you can retry wholesale, copy as links, or export to JSON / Markdown;
-6. **Hand over evidence** — the diagnostics tab cross-tabulates environment and "OS × error type", one click to export JSON for a bug report.
+1. **Paste once, expand everything** — folder links are walked recursively (subfolders optional), pagination is followed to the end, and single-file links plus `?key=` short links are recognised automatically; the paste box takes one link per line and resolves the whole batch;
+2. **Mirror the source folder** — with "create a subfolder per folder name" on (the default), the directory you pick is a parent and files land in `<your dir>/<MediaFire folder name>/`, so two sources never mix;
+3. **Queue without flooding the other side** — 1–8 workers, a configurable gap between files, an optional KB/s ceiling, exponential backoff plus jitter on retries;
+4. **Resume instead of restart** — files are written to `.part` first and continue from the known offset;
+5. **Verify before calling it done** — SHA-256 is computed while downloading and compared with the value MediaFire reports; a mismatch is a failure, not a "completed" file;
+6. **Keep a ledger of failures** — 21 error categories land in a failure list you can retry wholesale, copy as links, or export to JSON / Markdown;
+7. **Hand over evidence** — the diagnostics tab cross-tabulates environment and "OS × error type", and one click exports the whole bundle as a zip for a bug report.
 
 ### Features
 
 | Capability | What it actually does | Where |
 |---|---|---|
-| Link parsing | Folder / single file / `?key=` short links; breadth-first recursion, 100 entries per page; the folder listing is fetched first so the second request only happens when subfolders exist (≈7 s for a typical folder) | `mfd/mediafire.py` |
-| Queueing | 1–8 threads (default 2), 1 s gap by default; deduplicated by quickkey or name+size | `mfd/downloader.py` |
-| Resume | `.part` file + `Range: bytes=N-`; if the server ignores the range and sends the whole body, the partial data is discarded rather than stitched | `mfd/downloader.py` |
-| Verification | SHA-256 against the API value; size tolerance `max(4096, 1%)`, anything beyond that is "incomplete download" | `mfd/downloader.py` |
+| Link parsing | Folder / single file / `?key=` short links; breadth-first recursion with 4 parallel workers per level, 100 entries per page; the folder listing is fetched first so the second request only happens when subfolders exist (≈7 s for a typical folder) | `mfd/mediafire.py` |
+| Batch paste | Three-line paste box; one link per line resolves the whole batch, reports progress per item, and a single bad link does not abort the rest | `mfd/ui/app.py` |
+| Source subfolder | "Create a subfolder per folder name" is on by default: parent dir + MediaFire folder name; the UI shows the real target under "Actual path" | `mfd/downloader.py` |
+| Queueing | 1–8 workers (default 2), 1 s gap by default; deduplicated by quickkey or name+size | `mfd/downloader.py` |
+| Speed limit | Global sliding-window limiter in KB/s (0 = unlimited); sleeps at most 0.5 s at a time so Stop stays responsive | `mfd/downloader.py` |
+| Resume | `.part` file + `Range: bytes=N-`; on a full-body response or HTTP 416 the partial data is discarded and the file restarts | `mfd/downloader.py` |
+| Verification | SHA-256 computed while streaming; size tolerance `max(4096, 1%)`, anything beyond that is "incomplete download" | `mfd/downloader.py` |
 | Failure list | 21 error categories; repeated failures bump a counter instead of piling up; grouped by kind and by platform; export JSON, Markdown, or a plain list of failed links | `mfd/failures.py` |
 | Retry failures only | "Retry all failed" re-queues just the failed tasks — completed files are never touched again | `mfd/downloader.py` |
-| Download history | Registry `HKCU\Software\MediaFireDownloader` by default, falling back to a JSON file; capped at 5000 entries; stores name, size, quickkey and folder name — never the full direct URL or absolute local path | `mfd/storage.py` |
+| Search and filter | Queue-tab search box (150 ms debounce) plus a status dropdown, applied together | `mfd/ui/app.py` |
+| Task context menu | Show in folder / open download folder / copy file name / copy failure reason / open source page / move up / move to top | `mfd/ui/app.py` |
+| Remembers its state | Window geometry, theme, last link, download dir, workers/gap/speed limit and finish action are saved on exit and restored on start | `mfd/settings.py` |
+| Update check | Compares against the latest GitHub release and offers the download page | `mfd/update.py` |
+| Diagnostics bundle | One click exports a zip with the diagnostics report, failure list, log and a readme | `mfd/ui/app.py` |
+| Finish action | After the queue drains: do nothing / open the folder / shut down (with a second confirmation) | `mfd/ui/app.py` |
+| Download history | Registry `HKCU\Software\MediaFireDownloader2` by default, falling back to a JSON file; capped at 5000 entries; stores name, size, quickkey and folder name — never the full direct URL or absolute local path | `mfd/storage.py` |
 | Diagnostics report | Environment snapshot plus an OS × error-type cross table, exported as JSON | `mfd/diagnostics.py` |
-| UI | Dark / light themes; Queue / Failures / Log / Diagnostics tabs; overview pills; DPI aware; fonts probed rather than assumed | `mfd/ui/` |
+| UI | Dark / light themes; Queue / Failures / Log / Diagnostics tabs; overview metric tiles; DPI aware; fonts probed rather than assumed | `mfd/ui/` |
 | Close behaviour | While downloading, closing the window asks: keep running in background / stop and exit / cancel | `mfd/ui/app.py` |
-| Filename safety | Illegal characters and reserved names handled, 180-char filename cap, 255-char full-path cap, same-name-different-size saved as `name (2).ext`, never overwritten | `mfd/util.py` |
+| Filename safety | Illegal characters, reserved names (`CON.zip` → `CON_.zip`), trailing dots and spaces, 180-char filename cap, 259-char full-path cap (truncated with a hash), same-name-different-size saved as `name (2).ext` — never overwritten | `mfd/util.py` |
+| Disk headroom | Estimates the remaining total before starting and warns if the volume is short; a network drive that cannot report free space does not block the download | `mfd/util.py` |
 
 ---
 
