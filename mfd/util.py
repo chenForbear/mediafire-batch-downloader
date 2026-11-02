@@ -167,6 +167,100 @@ def normalize_spaces(text):
     return text.strip()
 
 
+def process_integrity_level():
+    """返回当前进程的 Windows 完整性级别：``'low'`` / ``'medium'`` / ``'high'`` / ``'system'``。
+
+    为什么需要这一步（2026-11-02 实机取证）：
+      一个 exe 如果被放在带 ``Mandatory Label\\Low Mandatory Level`` 的目录里
+      （例如某些沙箱、受限工作区），Windows 会让它以**低完整性进程**启动。
+      低完整性进程写不进普通的中完整性目录，也不能通过 ShellExecute 拉起
+      资源管理器——于是表现成「明明有权限却报 Permission denied」「双击报错、
+      右键以管理员身份运行反而正常」。程序自己认得出这件事，就能直接把原因
+      写进报错里，而不是让用户去猜杀毒软件。
+
+    非 Windows、或系统调用取不到时返回 ``None``（调用方按"未知"处理）。
+    """
+    if os.name != "nt":
+        return None
+    rid = _integrity_rid()
+    if rid is None:
+        return None
+    if rid < 0x2000:
+        return "low"
+    if rid < 0x3000:
+        return "medium"
+    if rid < 0x4000:
+        return "high"
+    return "system"
+
+
+def _integrity_rid():
+    """取当前进程完整性级别的 RID（4096=低 / 8192=中 / 12288=高 / 16384=系统）。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        advapi = ctypes.windll.advapi32
+        kernel = ctypes.windll.kernel32
+
+        # 必须显式声明签名：64 位下 getcurrentprocess 返回 (HANDLE)-1，
+        # 不声明 restype 会被截成 32 位整数，传进 OpenProcessToken 就变成
+        # 0x00000000FFFFFFFF —— 那不是伪句柄，于是整个调用静默失败。
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                            ctypes.POINTER(wintypes.HANDLE)]
+        advapi.OpenProcessToken.restype = wintypes.BOOL
+        advapi.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                               ctypes.c_void_p, wintypes.DWORD,
+                                               ctypes.POINTER(wintypes.DWORD)]
+        advapi.GetTokenInformation.restype = wintypes.BOOL
+
+        token = wintypes.HANDLE()
+        # TOKEN_QUERY = 0x0008
+        if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008,
+                                       ctypes.byref(token)):
+            return None
+        try:
+            size = wintypes.DWORD(0)
+            # TokenIntegrityLevel = 25；第一次只为问大小，必然失败，属预期
+            advapi.GetTokenInformation(token, 25, None, 0, ctypes.byref(size))
+            if not size.value:
+                return None
+            buffer = ctypes.create_string_buffer(size.value)
+            if not advapi.GetTokenInformation(token, 25, buffer, size,
+                                              ctypes.byref(size)):
+                return None
+            # TOKEN_MANDATORY_LABEL { SID_AND_ATTRIBUTES Label; }，首字段是 PSID
+            sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+            if not sid:
+                return None
+            # SID 内存布局：Revision(1) / SubAuthorityCount(1) / Authority(6) / ...
+            count = ctypes.cast(sid, ctypes.POINTER(ctypes.c_ubyte))[1]
+            if not count:
+                return None
+            advapi.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
+            advapi.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+            pointer = advapi.GetSidSubAuthority(ctypes.c_void_p(sid), count - 1)
+            if not pointer:
+                return None
+            return int(pointer.contents.value)
+        finally:
+            kernel.CloseHandle(token)
+    except Exception:
+        return None
+
+
+def _permission_reason(errno_value=None):
+    """把 PermissionError 翻译成一句能照着做的话（低完整性优先解释）。"""
+    if process_integrity_level() == "low":
+        return ("没有写入权限——程序正以「低完整性」受限模式运行"
+                "（多半是被解压进了带限制标签的文件夹，比如沙箱工作区）。"
+                "把整个程序文件夹复制到桌面、或 D:\\ 下的普通目录再启动，不用管理员")
+    if errno_value is None:
+        return "没有写入权限（可能被杀毒软件锁定，或文件夹是只读的）"
+    return "没有写入权限（可能被杀毒软件锁定，或文件夹是只读的，errno %s）" % errno_value
+
+
 def probe_writable_dir(directory):
     """检查一个目录是否真的能写文件，返回 ``(ok, reason)``。
 
@@ -186,8 +280,13 @@ def probe_writable_dir(directory):
         if not os.path.isdir(directory):
             try:
                 os.makedirs(directory, exist_ok=True)
-            except PermissionError:
-                return False, "目录不存在且没有权限创建（检查上级文件夹是否只读）"
+            except PermissionError as exc:
+                if process_integrity_level() == "low":
+                    return False, ("目录不存在且创建不了——程序正以「低完整性」受限模式运行，"
+                                   "把整个程序文件夹复制到桌面或 D:\\ 下再试（errno %s）"
+                                   % getattr(exc, "errno", "?"))
+                return False, ("目录不存在且没有权限创建（检查上级文件夹是否只读，errno %s）"
+                               % getattr(exc, "errno", "?"))
             except OSError as exc:
                 return False, "目录不存在且创建失败：%s" % exc
         if not os.path.isdir(directory):
@@ -200,8 +299,8 @@ def probe_writable_dir(directory):
                 handle.write(b"mfd")
             finally:
                 handle.close()
-        except PermissionError:
-            return False, "没有写入权限（可能被杀毒软件锁定，或文件夹是只读的）"
+        except PermissionError as exc:
+            return False, _permission_reason(getattr(exc, "errno", None))
         except OSError as exc:
             return False, "写入测试失败：%s" % exc
         finally:

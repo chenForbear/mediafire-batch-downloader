@@ -2346,14 +2346,32 @@ class App(object):
             self._set_status("目标目录不可用：%s" % exc, "danger")
             return
         try:
-            if hasattr(os, "startfile"):
-                os.startfile(directory)  # Windows
-            else:
-                self._set_status("当前系统不支持直接打开目录", "warning")
+            self._open_in_explorer(directory)
         except OSError as exc:
             self._set_status("打开目录失败：%s" % exc, "danger")
             return
         self._set_status("已打开 %s" % directory, "success")
+
+    def _open_in_explorer(self, directory):
+        """打开一个目录。
+
+        优先用 explorer.exe：``os.startfile`` 对目录走 ShellExecute，在部分环境
+        （权限受限、被安全软件挂钩）会返回 ``[WinError 5] 拒绝访问``，而直接把
+        路径交给 explorer.exe 走的是另一条路，实测更稳。真不行再退回 startfile。
+        """
+        target = os.path.normpath(directory)
+        if os.name != "nt":
+            self._set_status("当前系统不支持直接打开目录", "warning")
+            return
+        try:
+            subprocess.Popen(["explorer.exe", target])
+            return
+        except OSError:
+            pass
+        if hasattr(os, "startfile"):
+            os.startfile(target)
+        else:
+            self._set_status("当前系统不支持直接打开目录", "warning")
 
     # -- 队列右键菜单与文件定位 ------------------------------------------
     def _task_for_iid(self, iid):
@@ -2425,7 +2443,7 @@ class App(object):
         directory = self._task_directory(task)
         if directory and os.path.isdir(directory):
             try:
-                os.startfile(directory)
+                self._open_in_explorer(directory)
             except OSError as exc:
                 self._set_status("打开文件夹失败：%s" % exc, "danger")
                 return

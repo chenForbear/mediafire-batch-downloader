@@ -110,3 +110,11 @@ step*.log
 .git-msg.txt
 _pack*.py
 _bump*.py
+
+# 下划线前缀是本项目的一次性调试脚本约定（_row_check.py、_probe_dl.py 之类），
+# 一律不入库；测试用的真材料都在 tests/ 下，不受影响。
+_*.py
+_*.png
+_*.log
+_*.txt
+!_*.md
