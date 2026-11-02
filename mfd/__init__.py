@@ -14,8 +14,8 @@
 除界面外全部模块只依赖 Python 标准库，Windows 7 SP1 + Python 3.8 即可运行。
 """
 
-__version__ = "2.0.4"
-__version_info__ = (2, 0, 4, 0)
+__version__ = "2.0.5"
+__version_info__ = (2, 0, 5, 0)
 
 APP_NAME = "MediaFire 批量下载器"
 APP_ID = "MediaFireDownloader2"

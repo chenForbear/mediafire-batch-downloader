@@ -17,6 +17,7 @@
 
 import os
 import queue
+import subprocess
 import threading
 import time
 import traceback
@@ -687,7 +688,13 @@ class App(object):
         self.browse_btn = self._register_tint(widgets.RoundedButton(
             options_row, "浏览…", command=self._choose_dir, kind="subtle",
             palette=palette, fonts=self.fonts, height=30, pad_x=12))
-        self.browse_btn.pack(side="left", padx=(8, 16))
+        self.browse_btn.pack(side="left", padx=(8, 8))
+
+        # 一键打开下载文件夹（用户 2026-11-02 要「快速打开下载文件夹」）
+        self.open_dir_btn = self._register_tint(widgets.RoundedButton(
+            options_row, "打开文件夹", command=self._open_dir, kind="subtle",
+            palette=palette, fonts=self.fonts, height=30, pad_x=12))
+        self.open_dir_btn.pack(side="left", padx=(0, 16))
 
         self._label(options_row, "线程", fg_token="text_dim",
                     font=self.fonts.small).pack(side="left", padx=(0, 8))
@@ -736,7 +743,7 @@ class App(object):
 
         self.hint_label = self._label(
             action_row,
-            "Ctrl+Enter 解析 · Ctrl+V 粘贴 · F5 刷新失败清单 · Ctrl+D 打开下载目录",
+            "Ctrl+Enter 解析 · Ctrl+V 粘贴 · F5 刷新失败清单 · Ctrl+D 打开文件夹 · 右键任务可定位文件",
             fg_token="text_dim", font=self.fonts.small, anchor="e")
         self.hint_label.pack(side="right", pady=(8, 0))
 
@@ -846,6 +853,10 @@ class App(object):
         wrapper.rowconfigure(0, weight=1)
         wrapper.columnconfigure(0, weight=1)
         self.queue_tree = tree
+
+        # 右键菜单 + 双击定位（用户 2026-11-02 要「右键任务列表能在文件夹中显示下载文件」）
+        tree.bind("<Button-3>", self._on_queue_menu)
+        tree.bind("<Double-1>", self._on_queue_double)
 
         # 空状态：和表格同一格居中叠着，有任务时 grid_remove()
         self.empty_state = self._frame(wrapper, "surface")
@@ -1158,12 +1169,21 @@ class App(object):
     # 3.4 快捷键
     # ------------------------------------------------------------------
     def _bind_shortcuts(self):
+        # 三层都挂：控件层（Entry/Text 类绑定会先吃掉按键）→ 顶层 → all
+        for sequence, handler in (
+                ("<Control-Return>", self._shortcut_parse),
+                ("<F5>", self._shortcut_refresh_failures),
+                ("<Control-d>", self._shortcut_open_dir),
+                ("<Control-D>", self._shortcut_open_dir)):
+            self.root.bind(sequence, handler)
+            self.root.bind_all(sequence, handler)
+        # Ctrl+V：Entry/Text 的类绑定带 break，会把 bind_all 挡掉，
+        # 所以在实际输入控件上再显式绑一份（实例绑定优先级最高）。
+        for widget in (self.link_entry, self.log_text):
+            for sequence in ("<Control-v>", "<Control-V>"):
+                widget.bind(sequence, self._on_paste, add="+")
         self.root.bind_all("<Control-v>", self._on_paste)
         self.root.bind_all("<Control-V>", self._on_paste)
-        self.root.bind_all("<Control-Return>", self._shortcut_parse)
-        self.root.bind_all("<F5>", self._shortcut_refresh_failures)
-        self.root.bind_all("<Control-d>", self._shortcut_open_dir)
-        self.root.bind_all("<Control-D>", self._shortcut_open_dir)
 
     def _on_paste(self, _event=None):
         widget = self.root.focus_get()
@@ -2334,6 +2354,113 @@ class App(object):
             self._set_status("打开目录失败：%s" % exc, "danger")
             return
         self._set_status("已打开 %s" % directory, "success")
+
+    # -- 队列右键菜单与文件定位 ------------------------------------------
+    def _task_for_iid(self, iid):
+        if not iid:
+            return None
+        for task in self._tasks:
+            if self._task_rows.get(id(task)) == iid:
+                return task
+        return None
+
+    def _on_queue_menu(self, event):
+        try:
+            iid = self.queue_tree.identify_row(event.y)
+            if iid:
+                self.queue_tree.selection_set(iid)
+        except tk.TclError:
+            iid = ""
+        self._popup_queue_menu(event, iid)
+
+    def _on_queue_double(self, event):
+        try:
+            iid = self.queue_tree.identify_row(event.y)
+        except tk.TclError:
+            return
+        task = self._task_for_iid(iid)
+        if task is not None:
+            self._reveal_task(task)
+
+    def _popup_queue_menu(self, event, iid):
+        task = self._task_for_iid(iid)
+        menu = tk.Menu(self.root, tearoff=0)
+        if task is not None:
+            menu.add_command(label="在文件夹中显示",
+                             command=lambda: self._reveal_task(task))
+            menu.add_command(
+                label="复制文件名",
+                command=lambda: self._copy_to_clipboard(getattr(task, "name", "")))
+            if str(getattr(task, "status", "")) == "failed":
+                menu.add_separator()
+                menu.add_command(label="重试这个任务",
+                                 command=lambda: self._retry_single(task))
+            menu.add_separator()
+        menu.add_command(label="打开下载文件夹", command=self._open_dir)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
+
+    def _task_directory(self, task):
+        try:
+            root_dir = getattr(self.downloader, "download_dir", "") or ""
+        except Exception:
+            root_dir = ""
+        if not root_dir:
+            root_dir = self._entry_text(self.dir_entry)
+        folder = getattr(task, "folder", "") or ""
+        if folder and root_dir:
+            return os.path.join(root_dir, folder)
+        return root_dir or ""
+
+    def _reveal_task(self, task):
+        path = getattr(task, "saved_path", "") or ""
+        if path and os.path.exists(path):
+            self._reveal_in_explorer(path)
+            return
+        directory = self._task_directory(task)
+        if directory and os.path.isdir(directory):
+            try:
+                os.startfile(directory)
+            except OSError as exc:
+                self._set_status("打开文件夹失败：%s" % exc, "danger")
+                return
+            self._set_status("文件还没下完，已打开它要去的文件夹", "info")
+            return
+        self._set_status("这个任务还没有落盘位置：等它下完再来", "warning")
+
+    def _reveal_in_explorer(self, path):
+        if os.name != "nt":
+            self._set_status("只有 Windows 支持在资源管理器中定位", "warning")
+            return
+        try:
+            subprocess.Popen('explorer /select,"%s"' % os.path.normpath(path))
+        except OSError as exc:
+            self._set_status("定位失败：%s" % exc, "danger")
+            return
+        self._set_status("已在资源管理器中定位：%s" % os.path.basename(path), "success")
+
+    def _copy_to_clipboard(self, text):
+        if not text:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except tk.TclError:
+            return
+        self._set_status("已复制：%s" % text[:60], "info")
+
+    def _retry_single(self, task):
+        try:
+            self.downloader.retry_task(task)
+        except Exception as exc:
+            self._set_status("重试失败：%s" % exc, "danger")
+            return
+        self._set_status("已重新排队：%s" % (getattr(task, "name", "") or ""), "info")
 
     def _is_viewable(self):
         try:

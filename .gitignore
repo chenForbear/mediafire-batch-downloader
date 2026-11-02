@@ -105,3 +105,8 @@ build-temp-dir/
 _repro.py
 build-log-*.txt
 step*.log
+
+# 本地一次性脚本与提交信息
+.git-msg.txt
+_pack*.py
+_bump*.py

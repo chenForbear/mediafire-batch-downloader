@@ -118,6 +118,19 @@ class DownloadTask(object):
         return "<DownloadTask %s %s %d/%d>" % (self.name, self.status, self.downloaded, self.size)
 
 
+def _read_chunk(response, size):
+    """优先用 ``read1``：有多少给多少，不会为了凑满 size 而把进度假死在 99%。
+
+    ``HTTPResponse.read(n)`` 会一直等到读满 n 字节或连接结束——服务器在文件末尾
+    附近限速或挂起时，界面就会长时间停在 99% 不动（用户 2026-11-02 报的现象）。
+    ``read1`` 收到多少立刻返回，数据能马上落盘、进度能平滑推进。
+    """
+    read1 = getattr(response, "read1", None)
+    if read1 is None:
+        return response.read(size)
+    return read1(size)
+
+
 class Downloader(object):
     """下载队列与工作线程池。
 
@@ -728,7 +741,13 @@ class Downloader(object):
                     (resume_from + content_length)
             else:
                 total = resume_from + content_length
-            if total and (not task.size or task.size != total):
+            if total and not task.size:
+                task.size = total
+                self._emit("task", task)
+            elif total and task.size and abs(total - task.size) > max(4096, task.size // 100):
+                # 差异超过 1% 才认远端的新值，免得每次重试都把总量改来改去
+                self._log("远端总长与记录不一致（%s → %s），以远端为准：%s"
+                          % (human_size(task.size), human_size(total), task.name))
                 task.size = total
                 self._emit("task", task)
 
@@ -743,7 +762,7 @@ class Downloader(object):
                     if self._stop_flag.is_set():
                         raise _Canceled()
                     self._wait_if_paused()
-                    chunk = response.read(CHUNK_SIZE)
+                    chunk = _read_chunk(response, CHUNK_SIZE)
                     if not chunk:
                         break
                     handle.write(chunk)
