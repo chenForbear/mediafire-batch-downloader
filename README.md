@@ -1,11 +1,13 @@
-# MediaFire Batch Downloader 2.0
+# MediaFire 批量下载器 2.1.0
 
-> A small Windows desktop tool that turns MediaFire share links — a single file, or a whole folder — into a **parsed, queued, resumable** batch download, with a failure list you can actually act on. No installer, no Python required, no account, nothing uploaded anywhere.
+**中文** | [English](README.en.md)
+
+> 把 MediaFire 的分享链接（单个文件，或者一整个文件夹）**批量解析、排队下载、失败可追、断了能续**的 Windows 桌面小工具。免安装、无需 Python、不登录账号、不传任何数据出去。
 
 > [!IMPORTANT]
-> **Unofficial project.** Not affiliated with, endorsed by, or connected to MediaFire in any way. This is a third-party client that resolves **publicly shared links** and downloads them — it does **not** bypass login, paywalls, password-protected shares, or any other access control, contains no DRM circumvention, and has no "crack / speed-unlock / throttle-bypass" functionality.
+> **非官方项目**：本项目与 MediaFire 官方没有任何关联，未获得其授权或认可。它只是一个把**公开分享链接**批量解析下载的第三方客户端——**不绕过登录、付费墙、提取码或任何访问控制**，不涉及 DRM 破解，也没有任何"破解 / 加速 / 绕过限速"的功能。
 >
-> **Use responsibly.** Only download content you have the right to obtain. The tool is a neutral file-transfer client; what you download and whether that infringes anyone's copyright is up to you, not the project.
+> **使用须知**：请只下载你有权获取的内容。工具本身是中性的文件传输客户端，下载什么内容、是否侵犯他人著作权，取决于使用者与内容的授权状态，与项目作者无关。
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![Standard Library](https://img.shields.io/badge/dependencies-none-4B5563)
@@ -14,102 +16,102 @@
 
 | | |
 |---|---|
-| Version | `2.1.0` (2026-11-02) |
-| Platforms | Windows 7 SP1 / 8.1 / 10 / 11 |
-| Runtime | Python 3.8+ (the packaged .exe needs none) |
-| Third-party dependencies | **None.** Tkinter for the UI, standard library everywhere else |
-| License | MIT |
+| 当前版本 | `2.0.1`（2026-11-01） |
+| 运行平台 | Windows 7 SP1 / 8.1 / 10 / 11 |
+| 运行环境 | Python 3.8+（打好的 exe 不需要装 Python） |
+| 第三方依赖 | **无**。除界面层用 Tkinter 外，全部标准库 |
+| 许可证 | MIT |
 
-> On version numbers: `2.0.0` is the start of a new numbering. The old `5.0` (and the earlier 4.x/3.x line) is **retired** — it shares no lineage with 2.0, and a bigger number here does not mean a bigger feature set. See [CHANGELOG.md](CHANGELOG.md).
-
----
-
-## Contents
-
-- [What it does](#what-it-does)
-- [Screenshot](#screenshot)
-- [Getting started](#getting-started)
-- [Usage](#usage)
-- [FAQ](#faq)
-- [How it works](#how-it-works)
-- [Project layout](#project-layout)
-- [Development and tests](#development-and-tests)
-- [Building the exe](#building-the-exe)
-- [Known limits](#known-limits)
-- [License](#license)
-- [Credits](#credits)
+> 版本号说明：2.0.0 是重新编号后的起点。历史 `5.0` 及更早版本**已废弃**，与 2.0 没有继承关系，详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
-## What it does
+## 目录
 
-A MediaFire folder page lets you click one file at a time. Two hundred files means two hundred clicks — plus the usual mess: connections drop halfway, you end up with a truncated file and no idea which of the two hundred failed.
+- [它能干什么](#它能干什么)
+- [截图](#截图)
+- [快速开始](#快速开始)
+- [使用说明](#使用说明)
+- [常见问题](#常见问题)
+- [技术实现简述](#技术实现简述)
+- [项目结构](#项目结构)
+- [开发与测试](#开发与测试)
+- [打包成 exe](#打包成-exe)
+- [已知限制](#已知限制)
+- [许可证](#许可证)
+- [致谢](#致谢)
 
-This tool does that whole loop in one pass:
+---
 
-1. **Paste once, expand everything** — folder links are walked recursively (subfolders optional), pagination is followed to the end, and single-file links plus `?key=` short links are recognised automatically; the paste box takes one link per line and resolves the whole batch;
-2. **Mirror the source folder** — with "create a subfolder per folder name" on (the default), the directory you pick is a parent and files land in `<your dir>/<MediaFire folder name>/`, so two sources never mix;
-3. **Queue without flooding the other side** — 1–8 workers, a configurable gap between files, an optional KB/s ceiling, exponential backoff plus jitter on retries;
-4. **Resume instead of restart** — files are written to `.part` first and continue from the known offset;
-5. **Verify before calling it done** — SHA-256 is computed while downloading and compared with the value MediaFire reports; a mismatch is a failure, not a "completed" file;
-6. **Keep a ledger of failures** — 21 error categories land in a failure list you can retry wholesale, copy as links, or export to JSON / Markdown;
-7. **Hand over evidence** — the diagnostics tab cross-tabulates environment and "OS × error type", and one click exports the whole bundle as a zip for a bug report.
+## 它能干什么
 
-### Features
+MediaFire 的分享页一次只给你点一个文件。一个文件夹里躺着两百个文件，就得点两百次——还得自己防着「点到一半断了」「下完发现是半截文件」「哪个失败了根本没记住」。
 
-| Capability | What it actually does | Where |
+这个工具把这件事一次做完：
+
+1. **一次粘贴，全部展开**：文件夹链接递归展开（子文件夹可关），翻页取全，单文件链接和 `?key=` 短链自动识别；粘贴框支持一行一个链接批量解析；
+2. **按来源建子目录**：勾上「按文件夹名建子目录」后，你选的目录只当父目录，文件落在 `<保存位置>/<MediaFire 文件夹名>/` 里，多个来源不会混成一堆；
+3. **排队下，不挤爆对方**：并发 1–8 可调，任务之间留可调间隔，可以给自己设 KB/s 上限，失败按指数退避加抖动重试；
+4. **断了接着下**：先写 `.part`，中断后从断点续传，不从头再来；
+5. **下完要验**：按 MediaFire 给的 SHA-256 边下边算，对不上就不算完成；
+6. **失败有账**：21 类错误分门别类记进失败清单，可以只重试失败项、把失败链接单独导出、把整份清单导成 JSON / Markdown；
+7. **出问题能交差**：诊断页把环境信息和「操作系统 × 报错类型」交叉统计摊开，一键导出诊断包（zip），报 bug 直接附上。
+
+### 功能特性
+
+| 能力 | 具体表现 | 落点 |
 |---|---|---|
-| Link parsing | Folder / single file / `?key=` short links; breadth-first recursion with 4 parallel workers per level, 100 entries per page; the folder listing is fetched first so the second request only happens when subfolders exist (≈7 s for a typical folder) | `mfd/mediafire.py` |
-| Batch paste | Three-line paste box; one link per line resolves the whole batch, reports progress per item, and a single bad link does not abort the rest | `mfd/ui/app.py` |
-| Source subfolder | "Create a subfolder per folder name" is on by default: parent dir + MediaFire folder name; the UI shows the real target under "Actual path" | `mfd/downloader.py` |
-| Queueing | 1–8 workers (default 2), 1 s gap by default; deduplicated by quickkey or name+size | `mfd/downloader.py` |
-| Speed limit | Global sliding-window limiter in KB/s (0 = unlimited); sleeps at most 0.5 s at a time so Stop stays responsive | `mfd/downloader.py` |
-| Resume | `.part` file + `Range: bytes=N-`; on a full-body response or HTTP 416 the partial data is discarded and the file restarts | `mfd/downloader.py` |
-| Verification | SHA-256 computed while streaming; size tolerance `max(4096, 1%)`, anything beyond that is "incomplete download" | `mfd/downloader.py` |
-| Failure list | 21 error categories; repeated failures bump a counter instead of piling up; grouped by kind and by platform; export JSON, Markdown, or a plain list of failed links | `mfd/failures.py` |
-| Retry failures only | "Retry all failed" re-queues just the failed tasks — completed files are never touched again | `mfd/downloader.py` |
-| Search and filter | Queue-tab search box (150 ms debounce) plus a status dropdown, applied together | `mfd/ui/app.py` |
-| Task context menu | Show in folder / open download folder / copy file name / copy failure reason / open source page / move up / move to top | `mfd/ui/app.py` |
-| Remembers its state | Window geometry, theme, last link, download dir, workers/gap/speed limit and finish action are saved on exit and restored on start | `mfd/settings.py` |
-| Update check | Compares against the latest GitHub release and offers the download page | `mfd/update.py` |
-| Diagnostics bundle | One click exports a zip with the diagnostics report, failure list, log and a readme | `mfd/ui/app.py` |
-| Finish action | After the queue drains: do nothing / open the folder / shut down (with a second confirmation) | `mfd/ui/app.py` |
-| Download history | Registry `HKCU\Software\MediaFireDownloader2` by default, falling back to a JSON file; capped at 5000 entries; stores name, size, quickkey and folder name — never the full direct URL or absolute local path | `mfd/storage.py` |
-| Diagnostics report | Environment snapshot plus an OS × error-type cross table, exported as JSON | `mfd/diagnostics.py` |
-| UI | Dark / light themes; Queue / Failures / Log / Diagnostics tabs; overview metric tiles; DPI aware; fonts probed rather than assumed | `mfd/ui/` |
-| Close behaviour | While downloading, closing the window asks: keep running in background / stop and exit / cancel | `mfd/ui/app.py` |
-| Filename safety | Illegal characters, reserved names (`CON.zip` → `CON_.zip`), trailing dots and spaces, 180-char filename cap, 259-char full-path cap (truncated with a hash), same-name-different-size saved as `name (2).ext` — never overwritten | `mfd/util.py` |
-| Disk headroom | Estimates the remaining total before starting and warns if the volume is short; a network drive that cannot report free space does not block the download | `mfd/util.py` |
+| 链接解析 | 文件夹 / 单文件 / `?key=` 短链；文件夹 BFS 递归（子文件夹 4 路并发）、每页 100 条翻页取全；先取文件列表、确认有子文件夹才发第二次请求（单文件夹典型解析 ≈ 7 秒） | `mfd/mediafire.py` |
+| 批量粘贴 | 粘贴框三行，一行一个链接一次解析，逐条报进度，单条失败不中断整批 | `mfd/ui/app.py` |
+| 来源子目录 | 「按文件夹名建子目录」默认勾选，父目录 + MediaFire 文件夹名；界面显示「实际存到：…」 | `mfd/downloader.py` |
+| 批量排队 | 并发 1–8（默认 2），任务间隔默认 1 秒；按快速键 / 文件名+大小去重 | `mfd/downloader.py` |
+| 限速 | 全局滑动窗口限速（KB/s，0＝不限），单次最多睡 0.5 秒，停止按钮依旧跟手 | `mfd/downloader.py` |
+| 断点续传 | `.part` 临时文件 + `Range: bytes=N-`；服务端返回整包或 416 时弃用断点重下 | `mfd/downloader.py` |
+| 完整性校验 | SHA-256 边下边算；大小容差 `max(4096, 1%)`，超出判「下载不完整」 | `mfd/downloader.py` |
+| 失败清单 | 21 类错误分类；同一条失败只累加次数；可按错误类型 / 平台分组；导出 JSON、Markdown、失败链接 txt | `mfd/failures.py` |
+| 只重试失败项 | 「重试全部失败」把 failed 任务重新入队，已完成的文件不会被再动一次 | `mfd/downloader.py` |
+| 搜索与筛选 | 队列页搜索框（150ms 防抖）+ 状态下拉，两者同时生效 | `mfd/ui/app.py` |
+| 任务右键 | 在文件夹中显示 / 打开下载文件夹 / 复制文件名 / 复制失败原因 / 打开源页 / 上移一位 / 置顶 | `mfd/ui/app.py` |
+| 记住状态 | 窗口大小位置、深浅主题、上次链接、下载目录、并发/间隔/限速、完成后动作——退出保存、启动恢复 | `mfd/settings.py` |
+| 检查更新 | 比对 GitHub 最新 Release，有新版给下载页 | `mfd/update.py` |
+| 诊断包 | 一键导出 zip（诊断报告 + 失败清单 + 日志 + 说明） | `mfd/ui/app.py` |
+| 完成后动作 | 全部结束「不做事 / 打开文件夹 / 关机」，关机需二次确认 | `mfd/ui/app.py` |
+| 下载历史 | 默认写注册表 `HKCU\Software\MediaFireDownloader2`，写不了自动退 JSON 文件；最多 5000 条；只存文件名、大小、快速键、目录名，不存完整直链与本机全路径 | `mfd/storage.py` |
+| 诊断报告 | 环境信息 + 「平台 × 错误类型」交叉表，导出为 JSON | `mfd/diagnostics.py` |
+| 界面 | 深色 / 浅色双主题；队列 / 失败清单 / 日志 / 诊断四页签；概览指标卡；DPI 感知；中文字体实测挑选 | `mfd/ui/` |
+| 关窗策略 | 下载中关窗三选一：继续后台 / 停止并退出 / 取消 | `mfd/ui/app.py` |
+| 文件名安全 | 非法字符、保留名（`CON.zip` → `CON_.zip`）、结尾点与空格、180 字符文件名上限、259 字符全路径上限（超长自动截断加哈希）、同名不同大小改名 `名字 (2).ext` 绝不覆盖 | `mfd/util.py` |
+| 磁盘余量 | 开始前估算剩余总量，不够就提醒；网络盘取不到空间不阻止下载 | `mfd/util.py` |
 
 ---
 
-## Screenshot
+## 界面预览
 
-> Screenshot **to be added**. Run `pythonw run.pyw` (or the packaged exe) to see the real interface: dark / light themes with a one-click switch, and four tabs (Queue / Failures / Log / Diagnostics).
-> This paragraph will be replaced once the screenshot is in.
+> 界面截图**待补**。运行 `pythonw run.pyw`（或双击打包好的 exe）即可直接看到实际界面：深 / 浅两套主题、右上角一键切换、四个页签（队列 / 失败清单 / 日志 / 诊断）。
+> 截图补齐后会替换本段文字。
 
 ---
 
-## Getting started
+## 快速开始
 
-### Option 1: grab the portable package (recommended)
+### 方式一：下载便携包（推荐）
 
-1. Download `MediaFire-Downloader-2.0.1-portable-win64.zip` from [Releases](https://github.com/chenForbear/mediafire-batch-downloader/releases);
-2. **Extract the whole archive first** — do not run anything from inside the zip viewer;
-3. Double-click `首次使用-双击我.bat` in the extracted folder. It clears the "downloaded from the internet" mark on these files, creates a desktop shortcut, and launches the app. **One time only**;
-4. From then on, use the desktop shortcut. No administrator rights, no Python.
+1. 打开 [Releases](https://github.com/chenForbear/mediafire-batch-downloader/releases) 下载 `MediaFire-Downloader-2.0.1-portable-win64.zip`；
+2. **把压缩包整个解压出来**（不要直接在压缩包里双击运行）；
+3. 双击解压目录里的 `首次使用-双击我.bat`——它会解除这些文件「来自网络」的锁定标记、在桌面建一个快捷方式、并启动程序。**只跑这一次**；
+4. 之后双击桌面快捷方式即可。不需要管理员权限，不需要装 Python。
 
-> **About "Windows protected your PC"**: that is SmartScreen's default reaction to *any* unsigned binary — every independently built exe gets stopped once on first download. Step 3 removes the mark, so it will not appear again afterwards. If it still does, click "More info" → "Run anyway"; that is a one-off.
+> **关于「Windows 已保护你的电脑」**：这是 SmartScreen 对**所有没有数字签名的程序**的默认动作，不是这个程序有什么问题——任何个人开发者做的 exe，第一次下载都会被拦一次。跑过第 3 步之后就不会再弹；万一还看到，点「更多信息」→「仍要运行」，仅此一次。
 >
-> **Why the single-file build is no longer the default**: onefile builds unpack themselves into `%TEMP%\_MEIxxxx` on every launch. When `%TEMP%` is not writable, is restricted by group policy, or is blocked by security software, double-clicking fails outright — while "Run as administrator" happens to succeed because it runs at a different integrity level, which makes it *look* like the program needs admin rights. The onedir build unpacks nothing, never touches `%TEMP%`, and starts far faster.
+> **为什么不再默认发单文件版**：单文件版每次启动都要把自身解压到 `%TEMP%\_MEIxxxx`。`%TEMP%` 不可写、被组策略限制、或被安全软件拦住时，双击会直接失败；而「以管理员身份运行」因为换了完整性级别恰好能过，于是看起来像是「这程序需要管理员权限」。目录版不解压、不碰 `%TEMP%`，启动也快得多。
 >
-> On Windows 7, read the Win7 section of [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) first (SP1 and the UCRT update KB2999226 are hard requirements).
+> Windows 7 用户先看一眼 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) 里的 Win7 段（SP1 与 UCRT 补丁 KB2999226 是硬要求）。
 
-### Option 1b: single-file exe
+### 方式一·备选：单文件 exe
 
-Releases also ship `MediaFire-Downloader-2.0.1-windows-x64.exe`. One file, drop it anywhere — but it self-extracts on every launch (a few seconds slower) and needs a writable `%TEMP%`. Use it only when "one file on a USB stick" really matters.
+Releases 里同时提供 `MediaFire-Downloader-2.0.1-windows-x64.exe`。一个文件、拷到哪都能放，但每次启动都要自解压（慢几秒），且依赖 `%TEMP%` 可写。只有「只想往 U 盘拷一个文件」这种场景才建议用它。
 
-### Option 2: run from source
+### 方式二：源码运行（想看代码、想改）
 
 ```powershell
 git clone https://github.com/chenForbear/mediafire-batch-downloader.git
@@ -117,220 +119,220 @@ cd mediafire-batch-downloader
 python run.pyw
 ```
 
-Python 3.8 or newer with Tkinter (the official Windows installer includes it). `run.pyw` is a windowed entry point, so **no console flashes up**. To check your environment, run the offline suite:
+要求 Python 3.8 或更高，且带 Tkinter（Windows 官方安装包默认带）。`run.pyw` 是窗口程序，**不会弹控制台**；想确认环境是否齐，可以先跑一遍离线测试：
 
 ```powershell
 python tests\test_offline.py
 ```
 
-If anything does crash, the traceback lands in `%LOCALAPPDATA%\MediaFireDownloader2\crash.log`.
+崩溃信息（如果真有）落在 `%LOCALAPPDATA%\MediaFireDownloader2\crash.log`。
 
 ---
 
-## Usage
+## 使用说明
 
-Five steps, laid out in the same order in the UI.
+整个流程是五步，界面上也是按这个顺序排的。
 
-### 1. Parse: links become tasks
+### 1. 解析：把链接变成任务
 
-Paste a MediaFire link into the input box — `Ctrl+V` works directly, or press `Ctrl+Enter` inside the box to paste and parse in one go. Three shapes are supported:
+把 MediaFire 链接粘进输入框——可以直接 `Ctrl+V`，或者在输入框里按 `Ctrl+Enter` 一步到位。支持三种形态：
 
 ```
-https://www.mediafire.com/folder/xxxxxxxxxxxx/folder-name
-https://www.mediafire.com/file/xxxxxxxxxxxx/file-name.rar/file
+https://www.mediafire.com/folder/xxxxxxxxxxxx/文件夹名
+https://www.mediafire.com/file/xxxxxxxxxxxx/文件名.rar/file
 https://www.mediafire.com/?key=xxxxxxxxxxxx
 ```
 
-Options, all of them before parsing:
+解析前可以先调三件事：
 
-| Option | Meaning |
+| 选项 | 说明 |
 |---|---|
-| Save to | Target directory. Defaults to the first available of Desktop → Documents → Downloads, with a `MediaFireDownloads` subfolder created underneath; "Browse…" to change |
-| Threads | How many files download at once, 1–8, default 2. Too many invites rate limiting (see 429) |
-| Gap (s) | Pause between tasks, 0.2–10 s, default 1.0. Raise it if you hit 429 |
-| Include subfolders | Whether folder links recurse into subfolders, default on |
+| 保存到 | 目标目录，默认按「桌面 → 我的文档 → Downloads」找第一个可用的，并在其下建 `MediaFireDownloads` 子目录；「浏览…」可改 |
+| 线程 | 同时下载几个文件，1–8，默认 2。开太大容易被限速（见 429） |
+| 间隔(秒) | 每个任务之间停多久，可调 0.2–10，默认 1.0。遇到 429 就把它调大 |
+| 含子文件夹 | 文件夹链接是否递归展开子文件夹，默认开 |
 
-Hit **Parse and add to queue**. Parsing runs on a background thread, so the UI stays responsive and reports progress (which page, how many found) as it goes.
+点「解析并加入队列」。解析在后台线程跑，界面不会假死；进度会实时回显（正在读第几页、扫到多少个）。
 
-### 2. Queue: see what you're getting
+### 2. 排队：看清要下什么
 
-The queue table has six columns: **file name / size / progress / speed / status / save location**.
+队列页六列：**文件名 / 大小 / 进度 / 速度 / 状态 / 保存位置**。
 
-- Six statuses only: `Queued`, `Downloading`, `Completed`, `Exists, skipped`, `Failed`, `Cancelled`;
-- Entries already in the history whose local file is still present are marked `Exists, skipped` and not fetched again;
-- Same name **and** same size in the target folder: skipped. Same name, **different** size: downloaded as `name (2).ext` — your existing file is never touched.
+- 状态只有六种：`排队中`、`下载中`、`已完成`、`已存在，跳过`、`失败`、`已取消`；
+- 历史里记过、且本地文件还在的条目，会直接标成「已存在，跳过」，不重复下载；
+- 目标目录已有同名**同大小**文件：跳过；同名**不同大小**：改名成 `名字 (2).ext` 下载，绝不动你原来的文件。
 
-The overview pills at the top track **completed / failed / skipped / total** plus an ETA.
+顶部概览胶囊同步显示 **完成 / 失败 / 跳过 / 总计** 和 **剩余** 时间。
 
-Three buttons: **Start**, **Pause** (becomes Resume), **Stop**.
+按钮三个：**开始下载** / **暂停**（暂停后变「继续」）/ **停止**。
 
-### 3. Failures: know exactly what went wrong
+### 3. 失败清单：知道哪里不对
 
-Failures are recorded, not buried in a log: **file name / error type / reason / attempts / time**.
+失败不是丢进日志里自生自灭，而是逐条进清单：**文件名 / 错误类型 / 原因 / 尝试次数 / 时间**。
 
-Error types are a fixed vocabulary of 21 categories — `HTTP 403 forbidden`, `Connection timed out`, `Out of disk space`, `Checksum mismatch`, `MediaFire API error`, and so on. Each carries a one-line remedy in plain language, so you are not left decoding `errno 13`.
+错误类型是统一口径的 21 类，比如 `HTTP 403 拒绝访问`、`连接超时`、`磁盘空间不足`、`文件校验不通过`、`MediaFire 接口报错`。每类都配了一句人话处置建议——不是让你去猜「errno 13 是什么」。
 
-Toolbar:
+工具条五个按钮：
 
-- **Retry all failed** — re-queue them (appended to a running download, or started immediately when idle);
-- **Copy failed links** — the failed URLs go to the clipboard in one shot;
-- **Export JSON** / **Export Markdown** — for records, for pasting into an issue, for sending to someone else;
-- **Clear** — behind a confirmation prompt.
+- **重试全部失败**：把清单里的任务重新排队（下载已在跑就追加进去，没在跑就直接开）；
+- **复制失败链接**：把失败链接一次性写进剪贴板，粘到哪儿都行；
+- **导出 JSON** / **导出 Markdown**：留档、发给别人、贴进 issue；
+- **清空**：会先弹一次确认（不可撤销），清掉就没了。
 
-`F5` refreshes the list.
+`F5` 刷新清单。
 
-### 4. Retry: only what needs retrying
+### 4. 重试：只重跑该重跑的
 
-"Retry all failed" touches failed items only. Completed files are not re-requested and not overwritten. If you would rather download the failures somewhere else, "Copy failed links" gives you a plain list of URLs.
+「重试全部失败」只碰失败项。已经下完的文件不会被重新请求，也不会被覆盖。如果你只是想把失败链接拿到别处去下，用「复制失败链接」即可，它导出的就是一份纯链接清单。
 
-> A common combination: when a whole page of 403s appears, don't hammer retry before reading [the three causes of 403](#faq) — if the direct link simply expired, a retry re-resolves it and succeeds; if the file has been made private, a hundred retries change nothing.
+> 一个常见组合：遇到一片 403 先别急着重试，先看 [常见问题](#常见问题) 里 403 的三种归因——如果确实是直链过期，重试会拿新直链，能过；如果是文件被设成私密，重试一百次也一样。
 
-### 5. Diagnostics: hand over the scene of the crime
+### 5. 诊断报告：把现场交出去
 
-The diagnostics tab does two things:
+诊断页做两件事：
 
-1. **List the environment**: OS and build, locale, UI fonts, DPI, current theme, whether the download directory is writable;
-2. **Cross-tabulate failures**: a table of **OS × error type** — which category dominates on which system becomes obvious at a glance.
+1. **列环境**：系统与版本、区域、界面字体、DPI、当前主题、下载目录是否可写等；
+2. **交叉归集**：把失败记录按「**操作系统 × 报错类型**」两个维度铺成表——哪套系统上哪类错误多，一眼能看出来。
 
-"Export diagnostics report" writes a JSON file; "Recollect" refreshes it. When you file a bug, **attach that file** (see the [issue template](.github/ISSUE_TEMPLATE/bug_report.md)).
+点「导出诊断报告」得到一份 JSON，「重新采集」可刷新。报 bug 时**请附上这份报告**（详见 [issue 模板](.github/ISSUE_TEMPLATE/bug_report.md)）。
 
-Filenames can contain personal information — give the file a look before sharing. Keep the category labels (error type, platform): those are the part that actually localises the problem.
+文件名里可能带个人信息，导出前可以自己先看一眼；分类标签（错误类型、平台）建议保留，那是定位问题最值钱的部分。
 
 ---
 
-## FAQ
+## 常见问题
 
-### Download fails with 403 — is the file gone, or is it me?
+### 下载报 403，是文件没了还是我的问题？
 
-403 in this context has **three different causes**, and the remedies differ:
+403 在这个场景里有**三种完全不同的归因**，处置也不一样：
 
-| Cause | How to tell | What to do |
+| 归因 | 怎么判断 | 怎么办 |
 |---|---|---|
-| ① The direct link expired | The link was resolved long before the download started, or the queue sat idle for a while | Just retry. Every download attempt **re-resolves** the link first, so a retry normally succeeds |
-| ② The file was made private | Other files in the same folder download fine, only this one 403s; or the page asks for a password / reports the file removed | Ask the sharer. This tool has no login state and cannot fetch private files |
-| ③ ISP or proxy interception | Switching networks (phone hotspot, for instance) fixes it; happens consistently while a proxy is running | Disable the proxy or route `mediafire.com` direct. Corporate networks sometimes block the whole domain |
+| ① 直链已过期 | 解析出来很久才开始下；或队列停了半天再继续 | 直接重试。程序每次下载都会**重新解析**拿新直链，所以重试通常就过了 |
+| ② 文件被设为私密 | 同一个文件夹里别的能下、就这个 403；或页面提示需要密码 / 已移除 | 找分享者确认权限。本程序不带登录态，私密文件下不了 |
+| ③ 运营商 / 代理拦截 | 换网络（比如手机热点）就好；代理软件开着的时候必现 | 关掉代理或改成分流直连；公司网络可能整段封了 `*.mediafire.com` |
 
-There is a lookalike worth knowing: HTTP 407 (proxy authentication required). It is classified separately as "proxy authentication", not folded into 403.
+三类之外还有一种「看着像 403 其实是别的」：HTTP 407（代理要认证）。程序会把它单独归到「代理认证」而不是 403。
 
-### What does "the direct link expired" mean?
+### 直链过期是什么意思？
 
-The download button on a MediaFire share page points at a **time-limited** direct URL. Resolve it, leave it sitting, and it eventually stops working — that is where a 403 comes from.
+MediaFire 分享页上的下载按钮指向的是一条**有时效的临时直链**。解析出来放着不用，过一阵就失效了——这时候拿它去请求就是 403。
 
-This program handles it by design: it **re-resolves the link before every download attempt** rather than caching a URL once and reusing it. As long as the file itself still exists, resuming and retrying will not fail because the link got old.
+本程序的处理方式是：**每次真正开始下载前重新解析一次**，而不是解析完就把链接存起来慢慢用。所以只要文件本身还在，续传和重试都不会因为「链接太老」而失败。
 
-### Can it download private files?
+### 私密文件能下吗？
 
-No. A private file requires a logged-in MediaFire session before the page will render a download button; this program stores and sends no account information at all, so there is nothing to work with.
+不能。私密文件需要在浏览器里登录 MediaFire 账号才拿得到下载按钮，本程序不保存、不发送任何账号信息，因此无从获取。
 
-A common misread: only *some* files inside a folder are private. The symptom is a task list shorter than what the web page shows, or a few files that always 403.
+常见的一种误判：文件夹里**部分**文件私密，症状是解析出来的任务比你在网页上看到的少，或者某几个文件固定 403。
 
-### Downloads stall whenever a proxy or VPN is on?
+### 代理 / VPN 开着就下不动？
 
-Two typical symptoms:
+两个典型症状：
 
-- **407**: the proxy wants credentials the program does not have → classified as "proxy authentication". Allow `mediafire.com` / `download*.mediafire.com` through, or go direct;
-- **SSL certificate error**: some proxies perform TLS interception and the chain does not validate → classified as "certificate / TLS". The program uses the system trust store and enforces TLS 1.2+, and will not disable verification just to make a connection work.
+- **407**：代理要求认证但程序没带凭据 → 归到「代理认证」类。让代理放行 `mediafire.com` / `download*.mediafire.com`，或改直连；
+- **SSL 证书错误**：部分代理会做 TLS 中间人，证书链校验不过 → 归到「证书 / TLS」类。程序用的是系统默认证书库并强制 TLS 1.2+，不会为了「能连上」去关校验。
 
-### Does it run on Windows 7?
+### Windows 7 能用吗？
 
-Yes, subject to three hard requirements (details and remedies in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)):
+能，但有三个硬条件（细节和处置都在 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)）：
 
-1. **SP1** is mandatory;
-2. The **TLS 1.2** update (KB3140245 and friends) must be installed, otherwise every `https://` request fails;
-3. A packaged build must ship **Tk 8.6 plus the tcl/tk data directories**, and must **strip the build machine's UCRT** (otherwise `api-ms-win-crt-*` is missing on Win7 and the app fails to start). `packaging/build.spec` already does both.
+1. 必须是 **SP1**；
+2. 必须打过 **TLS 1.2** 支持补丁（KB3140245 一类），否则所有 `https://` 请求直接失败；
+3. 打包版必须把 **Tk 8.6 与 tcl/tk 数据目录**一起带上，且**剔除打包机自带的 UCRT**（否则在 Win7 上缺 `api-ms-win-crt-*` 直接启动失败）。仓库里的 `packaging/build.spec` 已经处理了这两件事。
 
-### I closed the window / lost the network halfway. Start over?
+### 下到一半关了窗口 / 断了网，要重下吗？
 
-No. Bytes already written stay in `name.part` and the next attempt continues from there. Two cases restart honestly from zero: the server does not support ranges (returns the whole body instead of a 206), or the `.part` size is clearly wrong — a restart beats a corrupted file.
+不用。已写入的部分留在 `文件名.part` 里，下次从断点接着要。两种情况下会老实重下：服务端不支持分段（返回整包而不是 206）、或者 `.part` 的大小明显不对——宁可重下，也不拼出一个坏文件。
 
-### Will it overwrite files with the same name?
+### 同名文件会被覆盖吗？
 
-Never. Same size → treated as present, skipped. Different size → saved as `name (2).ext`.
+不会。同大小 → 判为已存在，跳过；不同大小 → 改名 `名字 (2).ext`。
 
-### Does it send my data anywhere?
+### 我的数据会被传出去吗？
 
-Apart from MediaFire's own hosts (`www.mediafire.com`, `download*.mediafire.com`), the program contacts nothing. No analytics, no telemetry, no auto-update.
+除 MediaFire 官方域名（`www.mediafire.com`、`download*.mediafire.com`）之外，程序不向任何地址发请求。没有统计、没有遥测、没有自动更新。
 
-### Double-clicking does nothing / the window flashes and disappears
+### 双击没反应 / 一闪就没？
 
-For the packaged build, check whether security software quarantined it. For the source build, read `%LOCALAPPDATA%\MediaFireDownloader2\crash.log`. On Windows 7, "double-click does nothing" is almost always a missing UCRT or Tk data directories that were not packaged.
-
----
-
-## How it works
-
-### Two phases
-
-**Phase 1 — resolve (talking to MediaFire)**
-
-This uses MediaFire's public web API (`https://www.mediafire.com/api/1.4`), not a private endpoint:
-
-1. Extract the `folder_key` / `quick_key` from the link — `/folder/`, `/file/`, `?key=` and `folder_key=` are all recognised;
-2. Folders go through `folder/get_content`, 100 entries per page, following `more_chunks` until it stops saying `yes`;
-3. **The file listing is requested first**, and `folder_count` decides whether a second `content_type=folders` request is worth making; only then does breadth-first recursion begin (with a `visited` set, so a cycle cannot hang it). This cut a typical single-folder parse from 11.5 s to about 7 s;
-4. When the API returns `result != "Success"`, the code is translated into plain language — `127` folder not found, `128` private, `129` invalid key or not a folder;
-5. Single files go through `file/get_info` for name, size, quickkey and **SHA-256**;
-6. Immediately before downloading, the share page is opened again and the **fresh** direct URL is taken from the `downloadButton` href (both HTML orderings are handled); the button text (`download (12.3 MB)`) doubles as a size fallback.
-
-**Phase 2 — download (talking to disk)**
-
-1. The target path is built from directory plus filename: subdirectories are created per folder segment (each segment sanitised), then `fit_in_directory` keeps the full path under 255 characters;
-2. An existing `.part` means a `Range: bytes=N-` request; a response that is not `206 Partial Content` discards the partial data and restarts;
-3. Data is written in 1 MB blocks with `fsync`, while progress is reported at most twice a second — fast enough to feel live, slow enough not to flood the UI;
-4. Two checks on completion: size (tolerance `max(4096, 1%)`) and SHA-256;
-5. Only then is the file renamed into place with `os.replace` — **at no point does a half-written file carry its final name**;
-6. A failure is recorded in the failure list; a success discards the matching entry and appends to the download history.
-
-### Threading model
-
-- Worker pool `mfd-worker-N` (daemon threads), size clamped to 1–8;
-- One monitor thread that aggregates progress and emits events every 0.5 s;
-- Tasks live in a `deque`, with a 1.5 s drain window so tasks can be appended mid-run;
-- The UI only consumes events (`log` / `task` / `progress` / `failure` / `finished`) and mutates widgets on the main thread — background threads never touch a widget.
-
-### Resume vs. verification
-
-These solve two different problems and are deliberately separate:
-
-- **Resume solves time** — an hour-long download should not restart because the connection blipped. That is `.part` plus `Range`;
-- **Verification solves correctness** — resuming implicitly assumes "the bytes I stitched together really are the original file". MediaFire reports a SHA-256, so it is recomputed locally and compared; a mismatch deletes the `.part` and fails the task. **A checksum failure is never counted as success** — that matters far more than download speed.
-
-Retry counts, timeouts and backoff are constants at the top of `mfd/mediafire.py` and `mfd/downloader.py`: a request times out after 30 s (the remote-size probe uses 15 s), a failed body read is retried up to 3 times (backoff `min(2^n, 8)` seconds), and a failed download is retried up to 3 times (backoff `min(2^n, 30)` seconds).
+打包版先看有没有被杀软隔离（历史记录里找一下）；源码版看 `%LOCALAPPDATA%\MediaFireDownloader2\crash.log`。Win7 上的「双击无反应」九成是 UCRT 缺失或 Tk 数据目录没打进去。
 
 ---
 
-## Project layout
+## 技术实现简述
+
+### 两个阶段
+
+**阶段一：解析（和 MediaFire 说话）**
+
+用的是 MediaFire 的公开 Web API（`https://www.mediafire.com/api/1.4`），不是非公开接口：
+
+1. 从链接里抠出 `folder_key` / `quick_key`（`/folder/`、`/file/`、`?key=`、`folder_key=` 四种写法都认）；
+2. 文件夹走 `folder/get_content`：每页 100 条，读 `more_chunks` 决定要不要继续翻；
+3. **先只请求 `content_type=files`**，从返回里拿到 `folder_count`；只有确实存在子文件夹时才发第二次 `content_type=folders` 请求，再做 BFS 递归（`visited` 去重，防环）。这一步把单文件夹的解析从 11.5 秒压到约 7 秒；
+4. 接口返回 `result != "Success"` 时按错误码翻译成人话——`127` 文件夹不存在、`128` 私密、`129` key 无效或不是文件夹；
+5. 单个文件走 `file/get_info` 拿名称、大小、快速键和 **SHA-256**；
+6. 真正下载前再打开分享页，从 `downloadButton` 的 `href` 取**当次有效**的直链（两种 HTML 顺序都兼容）；按钮文本里的 `download (12.3 MB)` 顺带当大小的兜底来源。
+
+**阶段二：下载（和磁盘说话）**
+
+1. 目标路径由「目录 + 文件名」算出：先按文件夹层级建子目录（每段都过一遍文件名净化），再用 `fit_in_directory` 保证全路径不越 255 字符；
+2. 有 `.part` 就带 `Range: bytes=N-` 续传；响应不是 `206 Partial Content` 就丢弃断点重下；
+3. 1 MB 一块写入并 `fsync`，写盘同时上报速度（0.5 秒节流，不刷屏）；
+4. 下完做两道校验：大小（容差 `max(4096, 1%)`）与 SHA-256；
+5. 全部通过才 `os.replace` 原子改名成正式文件名——**任何时刻中断，目录里都不会出现半截的正式文件**；
+6. 失败进失败清单，成功则从清单里撤掉对应条目，并写一条下载历史。
+
+### 线程模型
+
+- 下载线程池：`mfd-worker-N`（daemon），线程数钳在 1–8；
+- 一个监控线程：每 0.5 秒汇总一次进度并发事件；
+- 任务队列用 `deque`，「运行中追加」有 1.5 秒的收尾窗口；
+- 界面层只收事件（`log` / `task` / `progress` / `failure` / `finished`），所有控件操作都回到主线程——后台线程不碰控件。
+
+### 断点续传与 SHA-256
+
+两件事分开看：
+
+- **续传解决「时间」**：大文件下一个小时，中途断一次不该重来。`.part` + `Range` 就是这件事；
+- **校验解决「正确」**：续传的隐含风险是「我拼起来的字节真的是原文件吗」。MediaFire 接口给了 SHA-256，本地按块重算一遍比对，不符就删掉 `.part` 标失败——**校验不通过绝不算完成**，这比「下得慢」重要得多。
+
+重试次数、超时与退避都是常量，写在 `mfd/mediafire.py` 与 `mfd/downloader.py` 顶部：单次请求超时默认 30 秒（探测远端大小时用 15 秒），读正文失败最多重连重读 3 次（退避 `min(2^n, 8)` 秒），下载失败最多重试 3 次（退避 `min(2^n, 30)` 秒）。
+
+---
+
+## 项目结构
 
 ```
 mediafire-tool/v2/
-├─ run.pyw                  Windowed entry point (no console; crashes go to crash.log)
+├─ run.pyw                  窗口入口（无控制台；崩溃写 crash.log）
 ├─ mfd/
-│  ├─ __init__.py           Version, app name, module boundaries
-│  ├─ mediafire.py          Talking to MediaFire: parsing, pagination, direct URLs, error codes
-│  ├─ downloader.py         Talking to disk: queue, thread pool, resume, verification, atomic writes
-│  ├─ failures.py           Remembering failures: 21 categories, failure list, exports
-│  ├─ diagnostics.py        Remembering the environment: environment probe, OS × error cross-tab
-│  ├─ storage.py            Remembering history: registry / JSON backends, dedupe, cap
-│  ├─ paths.py              Data directory resolution (%LOCALAPPDATA%, override via MFD_DATA_DIR)
-│  ├─ util.py               Filename sanitising, path length, size and duration formatting
-│  └─ ui/                   Talking to the user: theme tokens, widgets, main window
-│     ├─ theme.py           Dark / light palettes, DPI, font probing
-│     ├─ widgets.py         Canvas-based controls (button, pill, progress bar, status dot, card)
-│     └─ app.py             Main window: four tabs, event pump, close policy
+│  ├─ __init__.py           版本号、程序名、模块边界说明
+│  ├─ mediafire.py          和 MediaFire 说话：解析链接、翻页、取直链、错误码翻译
+│  ├─ downloader.py         和磁盘说话：任务队列、线程池、续传、校验、原子落盘
+│  ├─ failures.py           记住失败：21 类错误分类、失败清单、导出
+│  ├─ diagnostics.py        记住环境：环境采集、平台 × 错误类型交叉统计
+│  ├─ storage.py            记住历史：注册表 / JSON 双后端、去重、上限
+│  ├─ paths.py              数据目录解析（%LOCALAPPDATA%，可用 MFD_DATA_DIR 覆盖）
+│  ├─ util.py               文件名净化、路径长度、大小与时间格式化
+│  └─ ui/                   和用户说话：主题令牌、自绘控件、主窗口
+│     ├─ theme.py           深 / 浅两套色板、DPI、字体实测
+│     ├─ widgets.py         Canvas 类控件（按钮、胶囊、进度条、状态点、卡片）
+│     └─ app.py             主窗口：四页签、事件泵、关窗策略
 ├─ tests/
-│  ├─ test_offline.py       Offline suite: local http.server fake direct links (Range / 403)
-│  ├─ test_diagnostics.py   Diagnostics suite: category mapping, cross-tab, report shape
-│  ├─ test_gui_smoke.py     UI smoke: window withdrawn, driven by update() only
-│  └─ test_live.py          Live checks (requires MFD_LIVE=1, skipped by default)
+│  ├─ test_offline.py       离线测试：本地 http.server 模拟直链（含 Range / 403）
+│  ├─ test_diagnostics.py   诊断测试：错误归属、交叉表、报告结构
+│  ├─ test_gui_smoke.py     界面冒烟：不显示窗口，只用 update() 驱动
+│  └─ test_live.py          联网实测（需 MFD_LIVE=1，默认跳过）
 ├─ packaging/
-│  ├─ build.spec            PyInstaller config (Tk data dirs, UCRT stripping, version info)
-│  └─ build.bat             One-command build (finds Python 3.8 automatically)
-├─ assets/                  Icon and version resource
+│  ├─ build.spec            PyInstaller 配置（Tk 数据目录、UCRT 剔除、版本信息）
+│  └─ build.bat             一键打包（自动找 Python 3.8）
+├─ assets/                  图标与版本信息
 ├─ docs/
-│  ├─ UI-CONTRACT.md        Contract between kernel and UI
-│  └─ COMPATIBILITY.md      Compatibility matrix and error-handling table
-├─ .github/ISSUE_TEMPLATE/  Issue template
-├─ pyproject.toml           Packaging metadata (no third-party dependencies)
+│  ├─ UI-CONTRACT.md        内核与界面的接口契约
+│  └─ COMPATIBILITY.md      兼容性矩阵与报错处置表
+├─ .github/ISSUE_TEMPLATE/  issue 模板
+├─ pyproject.toml           打包元数据（无第三方依赖）
 ├─ CHANGELOG.md
 ├─ CONTRIBUTING.md
 └─ LICENSE                  MIT
@@ -338,70 +340,78 @@ mediafire-tool/v2/
 
 ---
 
-## Development and tests
+## 开发与测试
 
 ```powershell
-# Offline suite: no network, no registry, no user directories
+# 离线测试：不联网、不读注册表、不碰用户目录
 python tests\test_offline.py
 
-# UI smoke test: no visible window, no mainloop; needs a desktop session
+# 界面冒烟：不开窗口、不 mainloop，需桌面环境（Tk 能建根窗口即可）
 python tests\test_gui_smoke.py
 
-# Both
+# 两个一起跑
 python -m unittest discover -s tests -v
 ```
 
-`test_offline.py` spins up a fake MediaFire direct link with the standard library's `http.server` and covers filename sanitising, size/duration formatting, URL decoding, link parsing, error classification, path masking, failure-list persistence, the task model, and a resumable download including a simulated 403. The suite **needs no network**, so it runs the same locally and on CI.
+`test_offline.py` 用标准库 `http.server` 起一个本地假服务模拟 MediaFire 直链，覆盖：文件名净化、大小/时间格式化、URL 解码、链接解析、错误分类、脱敏、失败清单读写、任务模型、以及带 `Range` 的续传与模拟 403。整套测试**不需要网络**，CI 和本机都能跑。
 
-Coding style, commit conventions and the PR checklist live in [CONTRIBUTING.md](CONTRIBUTING.md).
+代码风格、提交信息规范、PR 清单见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ---
 
-## Building the exe
+## 打包成 exe
 
 ```powershell
 cd packaging
 build.bat
 ```
 
-`build.bat` looks for an interpreter in this order: `..\..\build-env\nuget38\tools\python.exe` → `py -3.8` → `python`; checks for PyInstaller; clears `..\build-temp`; then runs:
+`build.bat` 会按顺序找解释器：`..\..\build-env\nuget38\tools\python.exe` → `py -3.8` → `python`，检查 PyInstaller，清 `..\build-temp`，然后执行：
 
 ```
 python -m PyInstaller --clean --noconfirm --distpath "..\dist" --workpath "..\build-temp" build.spec
 ```
 
-Output: `..\dist\MediaFire批量下载器2.0.exe`, a single file.
+产物默认是**单文件** `..\dist\MediaFire批量下载器2.0.exe`。想要**目录版**（启动不解压、不碰 `%TEMP%`，也就是正式发布用的形态），先设一个环境变量：
 
-Three things in `build.spec` are there for a reason, all learned the hard way:
+```powershell
+$env:MFD_ONEDIR = "1"
+python -m PyInstaller --clean --noconfirm --distpath "..\dist-dir" --workpath "..\build-temp-dir" build.spec
+```
 
-1. **Build with Python 3.8** if you want any chance of running on Windows 7 (see PyInstaller issue #6621);
-2. **Ship the Tk data directories**: `tcl8.6` / `tk8.6` are placed at `tcl/tcl8.6` and `tcl/tk8.6` inside the executable, otherwise the UI refuses to start on Win7;
-3. **Strip the build machine's UCRT**: `ucrtbase.dll` and the `api-ms-win-core-*` forwarders get pulled in from the build machine, but their versions do not match Win7 — drop those and keep `api-ms-win-crt-*`, or the app fails at startup.
+产物是 `..\dist-dir\MediaFire批量下载器2.0\` 一整个目录；分发时把 `setup.ps1` 与 `首次使用-双击我.bat` 放进去、再压成 zip 即可。
 
-The full matrix and per-case remedies are in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+`build.spec` 里有四件事值得知道，都是踩过坑才写进去的：
+
+1. **必须用 Python 3.8 打包**才有机会在 Win7 上跑（参见 PyInstaller issue #6621）；
+2. **Tk 数据目录要一起带**：把 `tcl8.6` / `tk8.6` 打到包内的 `tcl/tcl8.6`、`tcl/tk8.6` 位置，否则 Win7 上界面直接起不来；
+3. **要剔除打包机自带的 UCRT**：`ucrtbase.dll` 与 `api-ms-win-core-*` 转发 DLL 会被打进去，但它们在 Win7 上版本不匹配，缺 `api-ms-win-crt-*` 就会启动失败——所以打包时删前者、留后者；
+4. **两种形态只差一个环境变量**：`MFD_ONEDIR=1` 走 `EXE(..., exclude_binaries=True)` + `COLLECT(...)`；不设则走单文件 `EXE(...)`。单文件每次启动都要把自身解压到 `%TEMP%\_MEIxxxx`，`%TEMP%` 不可写或被拦时双击直接失败——这正是目录版成为默认发布形态的原因。
+
+完整矩阵与逐条处置见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
 
 ---
 
-## Known limits
+## 已知限制
 
-- **Public shares only**: private files require a login state, and this tool has none.
-- **The API is not official**: it relies on MediaFire's share pages and public web API; a change on their side or aggressive rate limiting will affect the tool. Error codes and symptoms are tracked in `docs/COMPATIBILITY.md`.
-- **Large folders take a few seconds to parse**: 100 entries per page means several round trips for a few hundred files (about 7 s for a typical folder).
-- **Packaging is Windows-specific**: the source runs anywhere with Python and Tk, but `packaging/` and the Win7 caveats are Windows-only concerns.
+- **只能下公开分享**：私密文件需要登录态，本程序不带登录。
+- **接口不是官方的**：用的是 MediaFire 分享页与公开 Web API，对方调整结构或限流就会影响本工具；错误码与现象会同步维护在 `docs/COMPATIBILITY.md`。
+- **解析大文件夹要等几秒**：每页 100 条，几百个文件的文件夹需要多次往返（典型单文件夹约 7 秒）。
+- **打包只对 Windows 有意义**：源码本身跨平台（有 Tk 就能跑），但 `packaging/` 与 Win7 相关的坑都是 Windows 专属。
 
 ---
 
-## License
+## 许可证
 
 [MIT](LICENSE) © 2026 MediaFire Batch Downloader contributors
 
-This project is not affiliated with, endorsed by, or sponsored by MediaFire. "MediaFire" is a trademark of its respective owner and is used here only to describe what the tool works with.
+本项目与 MediaFire 无隶属关系，也未获得其背书；"MediaFire" 是其各自权利人的商标，此处仅用于说明本工具的作用对象。
 
 ---
 
-## Credits
+## 致谢
 
-- **MediaFire** for serving share pages and a public web API without requiring a login — without that, a tool like this could not exist.
-- **[PyInstaller](https://pyinstaller.org/)** for single-file packaging, and for the Win7 pitfalls that had to be worked around (issue #6621 among them).
-- **Python and Tkinter**: `http.client`, `ssl`, `hashlib` and `tkinter` from the standard library carry the entire stack — no third-party code is involved.
-- **Users of the retired 5.0**: that version is gone, but the hard-won knowledge in its bug reports — error categories, Win7 patches, `more_chunks` pagination — carried straight into the 2.0 rewrite.
+- **MediaFire**：提供了无需登录即可读取的分享页与公开 Web API，才有了这类工具的可能。
+- **[PyInstaller](https://pyinstaller.org/)**：单文件打包，以及在 Win7 兼容性上那些必须绕开的坑（issue #6621 等）。
+- **Python 与 Tkinter**：标准库里的 `http.client` / `ssl` / `hashlib` / `tkinter` 撑起了这个项目的全部技术栈——没有引入任何第三方库。
+- **历史版本 5.0 的使用者**：那个版本已废弃，但反馈里的报错类型、Win7 补丁、`more_chunks` 翻页这些经验，被 2.0 的重写原样继承了下来。

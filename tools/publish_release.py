@@ -20,14 +20,14 @@ import urllib.request
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = "chenForbear/mediafire-batch-downloader"
-TAG = "v2.0.6"
-NAME = "2.0.6 —— 认出「低完整性」，说清为什么非要管理员"
-BODY_FILE = os.path.join(PROJECT_DIR, "dist-package", "release-body-206.md")
+TAG = "v2.1.0"
+NAME = "2.1.0 —— 按文件夹名建子目录，20 项新功能 + 20 处优化"
+BODY_FILE = os.path.join(PROJECT_DIR, "dist-package", "release-body-210.md")
 ASSETS = [
     os.path.join(PROJECT_DIR, "dist-package",
-                 "MediaFire-Downloader-2.0.6-portable-win64.zip"),
+                 "MediaFire-Downloader-2.1.0-portable-win64.zip"),
     os.path.join(PROJECT_DIR, "dist-package",
-                 "mediafire-batch-downloader-2.0.6-source.zip"),
+                 "mediafire-batch-downloader-2.1.0-source.zip"),
 ]
 API = "https://api.github.com"
 

@@ -87,7 +87,7 @@ if os.path.isdir(TCL_ROOT):
 
 # 文档随 exe 一起发（开源项目：用户点开就能看到用法与许可）
 extra_datas = []
-for name in ("README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md"):
+for name in ("README.md", "README.en.md", "LICENSE", "CHANGELOG.md"):
     path = os.path.join(PROJECT_DIR, name)
     if os.path.isfile(path):
         extra_datas.append((path, "."))

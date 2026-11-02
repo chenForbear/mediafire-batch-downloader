@@ -80,7 +80,7 @@ python -m unittest discover -s tests -v
 2. **`mfd/diagnostics.py`**：确认新类型能被正常归集——诊断报告的交叉统计是按错误类型 × 平台做计数的，新类型必须能在报告里出现，不能落进「其他」；
 3. **`docs/COMPATIBILITY.md`**：在报错表里加一行「现象 / 原因 / 处置」，措辞与 `KIND_HINT` 保持一致；
 4. **`tests/test_offline.py`**：`TestClassifyFailure` 加一条判据用例，把 `exc` 或 `message` 的真实形态钉住；
-5. **README**：若这是用户会撞上的高频错误，在[常见问题](README.zh-CN.md#常见问题)里补一段。
+5. **README**：若这是用户会撞上的高频错误，在[常见问题](README.md#常见问题)里补一段。
 
 ## 六、提交信息规范
 
