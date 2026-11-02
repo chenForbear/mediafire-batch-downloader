@@ -115,10 +115,13 @@ def _schedule(widget, delay_ms, callback):
 # ----------------------------------------------------------------------
 
 # 每种外观用到的令牌名；None 表示「透明」（露出父容器底色）
+#
+# 2.0.3 口径：ghost 平时透明、悬停才浮出 surface_alt 底色，不再是「一直挂着
+# 一块浅色块」；subtle 更弱，文字本身就用 text_dim。
 KIND_TOKENS = {
     "primary": {"fill": "accent", "hover": "accent_hover", "press": "accent_press",
                 "fg": "on_accent", "border": None},
-    "ghost": {"fill": "surface_alt", "hover": "surface_hi", "press": "border",
+    "ghost": {"fill": None, "hover": "ghost_hover", "press": "surface_hi",
               "fg": "text", "border": None},
     "outline": {"fill": None, "hover": "surface_alt", "press": "surface_hi",
                 "fg": "text", "border": "border"},
@@ -133,7 +136,7 @@ class RoundedButton(tk.Canvas):
     """圆角按钮：hover / press / disabled 三态，支持键盘 Space 与 Enter。"""
 
     def __init__(self, master, text="", command=None, kind="primary",
-                 palette=None, fonts=None, font=None, height=34, radius=9,
+                 palette=None, fonts=None, font=None, height=34, radius=8,
                  pad_x=18, min_width=0, tooltip=""):
         self._palette = palette or theme.current()
         self._fonts = fonts
@@ -299,6 +302,8 @@ class RoundedButton(tk.Canvas):
         fill, fg, border, _active = self._colors()
         width = max(int(self._natural_width()), 8)
         height = int(self._height)
+        # 按下时整体下移 1px：比只换颜色更有「按下去」的手感
+        offset = 1.0 if (self._pressed and self._enabled) else 0.0
         self.delete("all")
         canvas_bg = _parent_bg(self.master, self._palette)
         if self._focused and self._enabled:
@@ -307,9 +312,9 @@ class RoundedButton(tk.Canvas):
             inset = 2.0
         else:
             inset = 0.5
-        rounded_rect(self, inset, inset, width - inset, height - inset, self._radius,
-                     fill=fill or canvas_bg, outline=border, width=1)
-        self.create_text(width / 2.0, height / 2.0, text=self._text, fill=fg,
+        rounded_rect(self, inset, inset + offset, width - inset, height - inset + offset,
+                     self._radius, fill=fill or canvas_bg, outline=border, width=1)
+        self.create_text(width / 2.0, height / 2.0 + offset, text=self._text, fill=fg,
                          font=self._font)
 
     # -- 主题 ------------------------------------------------------------
@@ -534,8 +539,15 @@ class ProgressBar(tk.Canvas):
         fill_width = (width - 1.0) * self._value
         if fill_width > 1.0:
             token = "success" if self._value >= 0.999 else "accent"
-            rounded_rect(self, 0.5, 0.5, max(fill_width, self._radius * 2), height - 0.5,
+            right = max(fill_width, self._radius * 2)
+            rounded_rect(self, 0.5, 0.5, right, height - 0.5,
                          self._radius, fill=palette[token], outline="")
+            # 顶部 1px 高光：细条上多这一笔，纯色块才不至于发平
+            if height >= 6:
+                gloss = theme.mix(palette[token], palette["on_accent"], 0.34)
+                self.create_line(self._radius, 1.5,
+                                 max(right - self._radius, self._radius + 1.0), 1.5,
+                                 fill=gloss, width=1)
         if self._show_text:
             percent = int(round(self._value * 100))
             label = "%d%%" % percent
@@ -630,3 +642,89 @@ class StatusDot(tk.Canvas):
     def destroy(self):
         cancel_afters(self)
         tk.Canvas.destroy(self)
+
+
+# ----------------------------------------------------------------------
+# 七、指标卡
+# ----------------------------------------------------------------------
+
+class MetricTile(tk.Frame):
+    """概览条上的一格指标：上面大数字、下面小说明。
+
+    沿用原来的 ``set_text("完成 3")`` 调用方式（调用方 ``_apply_stats`` 不必改），
+    内部按最后一个空格把文案拆成「说明 + 数字」；数字大于 0 且给了 ``warn_token``
+    时切成警示色（失败数就是这么变红的）。
+    """
+
+    def __init__(self, master, text="", palette=None, fonts=None,
+                 value_token="text", warn_token=None):
+        self._palette = palette or theme.current()
+        self._fonts = fonts
+        self._value_token = value_token
+        self._warn_token = warn_token
+        self._label = ""
+        self._value = ""
+        tk.Frame.__init__(self, master, bg=self._palette["surface"], bd=0,
+                          highlightthickness=0)
+        value_font = fonts.metric if fonts else tkfont.nametofont("TkDefaultFont")
+        label_font = fonts.small if fonts else tkfont.nametofont("TkDefaultFont")
+        self._value_label = tk.Label(self, text="0", bg=self._palette["surface"],
+                                     fg=self._palette.get(value_token, self._palette["text"]),
+                                     font=value_font, anchor="w")
+        self._value_label.pack(side="top", anchor="w")
+        self._text_label = tk.Label(self, text="", bg=self._palette["surface"],
+                                    fg=self._palette["text_dim"],
+                                    font=label_font, anchor="w")
+        self._text_label.pack(side="top", anchor="w", pady=(2, 0))
+        self.set_text(text)
+
+    @staticmethod
+    def _split(text):
+        """``"完成 3"`` → ``("完成", "3")``；拆不开就把整串当说明。"""
+        raw = (text or "").strip()
+        if " " in raw:
+            head, tail = raw.rsplit(" ", 1)
+            cleaned = tail.replace(",", "").replace(".", "")
+            if cleaned.isdigit():
+                return head, tail
+        return raw, ""
+
+    def set_text(self, text):
+        label, value = self._split(text)
+        self._label = label
+        self._value = value
+        self._render()
+
+    def get_text(self):
+        if self._value:
+            return "%s %s" % (self._label, self._value)
+        return self._label
+
+    def _render(self):
+        token = self._value_token
+        if self._warn_token and self._value.isdigit() and int(self._value) > 0:
+            token = self._warn_token
+        try:
+            self._value_label.configure(text=self._value or "0",
+                                        fg=self._palette.get(token, self._palette["text"]))
+            self._text_label.configure(text=self._label,
+                                       bg=self._palette["surface"],
+                                       fg=self._palette["text_dim"])
+            self.configure(bg=self._palette["surface"])
+        except tk.TclError:
+            pass
+
+    def tint(self, palette, fonts=None):
+        self._palette = palette
+        if fonts is not None:
+            self._fonts = fonts
+            try:
+                self._value_label.configure(font=fonts.metric)
+                self._text_label.configure(font=fonts.small)
+            except tk.TclError:
+                pass
+        self._render()
+
+    def destroy(self):
+        cancel_afters(self)
+        tk.Frame.destroy(self)

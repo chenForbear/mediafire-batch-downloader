@@ -245,7 +245,9 @@ class Downloader(object):
                 already = self.history.has(task.name, task.size, task.quickkey)
             # 记录说下过，还要看文件是否真的还在盘上：用户可能已经把文件删了
             # （那就是想重下），这时不能跳过。
-            if already and (self._file_already_on_disk(task) or task.size > 0):
+            # 早期写法是 `already and (... or task.size > 0)`，那个 `or` 把磁盘
+            # 检查整个短路掉了——只要接口给了大小就一律跳过，用户删了文件也下不了。
+            if already and self._file_already_on_disk(task):
                 task.status = STATUS_SKIPPED
             new_tasks.append(task)
 
@@ -280,6 +282,23 @@ class Downloader(object):
             return False
         return False
 
+    def set_download_dir(self, directory):
+        """换保存目录。
+
+        为什么需要这个方法：引擎是第一次解析时按当时的保存位置建好的，
+        之后用户在输入框里改成别的文件夹，如果只改界面文本、不通知引擎，
+        引擎还会拿老目录去判定权限——表现就是「我明明换了地方，它还说
+        没有写入权限」。所以每次开始前都要同步一次。
+        """
+        directory = (directory or "").strip()
+        if not directory or directory == self.download_dir:
+            return False
+        self.download_dir = directory
+        self._writable_cache.clear()
+        self.last_error = ""
+        self._log("保存位置已切换到：%s" % directory)
+        return True
+
     def start(self):
         if self.is_running:
             self._log("任务已在运行中。")
@@ -289,8 +308,13 @@ class Downloader(object):
             self._log("队列为空，没有需要下载的文件。")
             return False
         if not pending:
+            # 注意：这里**不能**发 finished 事件。start() 没跑起来，UI 收到
+            # finished 会以为"下载正常结束"，弹一个"完成 0 · 失败 0"的框，
+            # 而真实原因是"根本没有可跑的任务"——两者混在一起就是 2.0.2
+            # 那个「点开始啥也不干、只弹下载结束」的 bug。
+            self.last_error = ("没有待下载的文件：队列里的 %d 个文件都已完成、已跳过或已失败。"
+                               % len(self.tasks))
             self._log("没有待下载的文件（全部已完成、已跳过或已失败，可点「重试全部失败」）。")
-            self._emit("finished", self.stats())
             return False
 
         # 开始前先确认保存目录真的能写（makedirs 在"目录已存在但只读"时不报错，
@@ -304,7 +328,8 @@ class Downloader(object):
             self._log("    请在界面上换一个文件夹再开始（例如 %s）"
                       % os.path.join(os.path.expanduser("~"), "Downloads"))
             self._writable_cache[self.download_dir] = (False, reason)
-            self._emit("finished", self.stats())
+            # 同上：启动失败不发 finished，否则界面会弹"下载结束 完成 0"，
+            # 用户以为跑完了，其实是压根没跑。
             return False
 
         self._stop_flag.clear()

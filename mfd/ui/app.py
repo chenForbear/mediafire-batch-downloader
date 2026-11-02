@@ -612,7 +612,7 @@ class App(object):
     def _build_header(self):
         palette = self.palette
         bar = self._frame(self.root, "bg", height=56)
-        bar.pack(side="top", fill="x", padx=18, pady=(14, 8))
+        bar.pack(side="top", fill="x", padx=16, pady=(16, 8))
         bar.pack_propagate(False)
 
         left = self._frame(bar, "bg")
@@ -621,46 +621,51 @@ class App(object):
                             font=self.fonts.title, anchor="w")
         title.pack(side="left")
 
+        # 版本胶囊：8 磅字 + 1px 描边 + 圆角 10，比原来那块实心色块轻一档
         self.version_pill = self._register_tint(widgets.Pill(
             left, self.kernel.SHORT_VERSION, palette=palette, fonts=self.fonts,
-            fg="accent", bg="surface_alt", font=self.fonts.small_bold))
-        self.version_pill.pack(side="left", padx=(10, 10), pady=(6, 0))
+            fg="accent", bg="surface_alt", outline="border",
+            font=self.fonts.tiny_bold, height=20, pad_x=10))
+        self.version_pill.pack(side="left", padx=(10, 12), pady=(8, 0))
 
         self.tagline_label = self._label(left, self.kernel.TAGLINE, bg_token="bg",
                                          fg_token="text_dim", font=self.fonts.small,
                                          anchor="w")
-        self.tagline_label.pack(side="left", pady=(8, 0))
+        self.tagline_label.pack(side="left", pady=(10, 0))
 
         right = self._frame(bar, "bg")
         right.pack(side="right", fill="y")
         self.theme_btn = self._register_tint(widgets.RoundedButton(
             right, self._theme_button_text(), command=self._toggle_theme,
-            kind="ghost", palette=palette, fonts=self.fonts, height=30))
-        self.theme_btn.pack(side="right", pady=6)
+            kind="ghost", palette=palette, fonts=self.fonts, height=32,
+            pad_x=12, min_width=0))
+        self.theme_btn.pack(side="right", pady=8)
 
         # 内核缺模块时的提示胶囊（正常时创建但隐藏，免得布局跳动）
         self.kernel_pill = self._register_tint(widgets.Pill(
             right, "内核未就绪", palette=palette, fonts=self.fonts,
-            fg="warning", bg="surface_alt", font=self.fonts.small_bold))
+            fg="warning", bg="surface_alt", outline="border",
+            font=self.fonts.tiny_bold, height=20, pad_x=10))
         if self.kernel.missing:
-            self.kernel_pill.pack(side="right", padx=(0, 8), pady=6)
+            self.kernel_pill.pack(side="right", padx=(0, 8), pady=8)
 
     def _theme_button_text(self):
-        return "切换到浅色" if theme.mode() == theme.MODE_DARK else "切换到深色"
+        # 图标式：月亮＝现在是深色、点了会变浅；太阳反之
+        return "☀ 浅色" if theme.mode() == theme.MODE_DARK else "☾ 深色"
 
     # -- 2. 输入卡 -------------------------------------------------------
     def _build_input_card(self):
         palette = self.palette
         card = self._register_tint(widgets.Card(self.root, palette=palette))
-        card.pack(side="top", fill="x", padx=18, pady=(0, 10))
+        card.pack(side="top", fill="x", padx=16, pady=(0, 12))
         body = card.body
-        body.configure(padx=14, pady=12)
+        body.configure(padx=16, pady=16)
 
         # 第一行：链接 + 主按钮
         link_row = self._frame(body, "surface")
         link_row.pack(fill="x")
         self.link_entry = self._entry(link_row, "surface_alt")
-        self.link_entry.pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 10))
+        self.link_entry.pack(side="left", fill="x", expand=True, ipady=8, padx=(0, 8))
         self._attach_placeholder(self.link_entry, "在这里粘贴 MediaFire 文件或文件夹链接（Ctrl+V）")
         self.parse_btn = self._register_tint(widgets.RoundedButton(
             link_row, "解析并加入队列", command=self._on_parse, kind="primary",
@@ -669,54 +674,60 @@ class App(object):
 
         # 第二行：目录 / 线程 / 间隔 / 含子文件夹
         options_row = self._frame(body, "surface")
-        options_row.pack(fill="x", pady=(10, 0))
+        options_row.pack(fill="x", pady=(12, 0))
 
         self._label(options_row, "保存到", fg_token="text_dim",
-                    font=self.fonts.small).pack(side="left", padx=(0, 6))
+                    font=self.fonts.small).pack(side="left", padx=(0, 8))
         self.dir_entry = self._entry(options_row, "surface_alt")
-        self.dir_entry.pack(side="left", fill="x", expand=True, ipady=5)
+        self.dir_entry.pack(side="left", fill="x", expand=True, ipady=6)
         try:
             self.dir_entry.insert(0, self.kernel.default_download_dir())
         except Exception:
             pass
         self.browse_btn = self._register_tint(widgets.RoundedButton(
             options_row, "浏览…", command=self._choose_dir, kind="subtle",
-            palette=palette, fonts=self.fonts, height=28, pad_x=12))
-        self.browse_btn.pack(side="left", padx=(6, 14))
+            palette=palette, fonts=self.fonts, height=30, pad_x=12))
+        self.browse_btn.pack(side="left", padx=(8, 16))
 
         self._label(options_row, "线程", fg_token="text_dim",
-                    font=self.fonts.small).pack(side="left", padx=(0, 6))
+                    font=self.fonts.small).pack(side="left", padx=(0, 8))
         self.threads_spin = self._spinbox(options_row, 1, 8, 1, width=3)
         self.threads_spin.delete(0, "end")
         self.threads_spin.insert(0, "2")
-        self.threads_spin.pack(side="left", ipady=3)
+        self.threads_spin.pack(side="left", ipady=4)
 
         self._label(options_row, "间隔(秒)", fg_token="text_dim",
-                    font=self.fonts.small).pack(side="left", padx=(14, 6))
+                    font=self.fonts.small).pack(side="left", padx=(16, 8))
         self.gap_spin = self._spinbox(options_row, 0.2, 10.0, 0.5, width=4)
         self.gap_spin.delete(0, "end")
         self.gap_spin.insert(0, "1.0")
-        self.gap_spin.pack(side="left", ipady=3)
+        self.gap_spin.pack(side="left", ipady=4)
 
         self.subfolder_var = tk.BooleanVar(value=True)
         self.subfolder_chk = self._checkbutton(options_row, "含子文件夹", self.subfolder_var)
-        self.subfolder_chk.pack(side="left", padx=(14, 0))
+        self.subfolder_chk.pack(side="left", padx=(16, 0))
+
+        # 解析完自动开始：默认勾上（用户 2026-11-02 要求「别让我再点一次」），
+        # 想手动控制的人可以取消勾选。
+        self.autostart_var = tk.BooleanVar(value=True)
+        self.autostart_chk = self._checkbutton(options_row, "解析后自动开始", self.autostart_var)
+        self.autostart_chk.pack(side="left", padx=(16, 0))
 
         # 第三行：动作按钮 + 快捷键提示
         action_row = self._frame(body, "surface")
-        action_row.pack(fill="x", pady=(12, 0))
+        action_row.pack(fill="x", pady=(16, 0))
 
         self.start_btn = self._register_tint(widgets.RoundedButton(
             action_row, "开始下载", command=self._on_start, kind="primary",
-            palette=palette, fonts=self.fonts, height=32, min_width=104))
+            palette=palette, fonts=self.fonts, height=34, min_width=104))
         self.start_btn.pack(side="left")
         self.pause_btn = self._register_tint(widgets.RoundedButton(
             action_row, "暂停", command=self._on_pause_toggle, kind="ghost",
-            palette=palette, fonts=self.fonts, height=32, min_width=78))
+            palette=palette, fonts=self.fonts, height=34, min_width=80))
         self.pause_btn.pack(side="left", padx=(8, 0))
         self.stop_btn = self._register_tint(widgets.RoundedButton(
             action_row, "停止", command=self._on_stop, kind="ghost",
-            palette=palette, fonts=self.fonts, height=32, min_width=78))
+            palette=palette, fonts=self.fonts, height=34, min_width=80))
         self.stop_btn.pack(side="left", padx=(8, 0))
 
         for button in (self.start_btn, self.pause_btn, self.stop_btn):
@@ -727,51 +738,73 @@ class App(object):
             action_row,
             "Ctrl+Enter 解析 · Ctrl+V 粘贴 · F5 刷新失败清单 · Ctrl+D 打开下载目录",
             fg_token="text_dim", font=self.fonts.small, anchor="e")
-        self.hint_label.pack(side="right", pady=(6, 0))
+        self.hint_label.pack(side="right", pady=(8, 0))
 
     # -- 3. 概览条 -------------------------------------------------------
+    def _readout_block(self, parent, caption, value, padx):
+        """右上角的小读数块：上面一行 9pt 说明，下面一行 11pt 数值。
+
+        返回的是**数值那个 Label**，好让 `_apply_stats` 直接 configure(text=...)。
+        """
+        box = self._frame(parent, "surface")
+        box.pack(side="left", padx=padx)
+        self._label(box, caption, fg_token="text_dim", font=self.fonts.tiny,
+                    anchor="e").pack(side="top", anchor="e")
+        value_label = self._label(box, value, fg_token="text",
+                                  font=self.fonts.value, anchor="e")
+        value_label.pack(side="top", anchor="e")
+        return value_label
+
     def _build_overview(self):
         palette = self.palette
         card = self._register_tint(widgets.Card(self.root, palette=palette))
-        card.pack(side="top", fill="x", padx=18, pady=(0, 10))
+        card.pack(side="top", fill="x", padx=16, pady=(0, 12))
         body = card.body
-        body.configure(padx=14, pady=12)
+        body.configure(padx=16, pady=16)
 
+        # ---- 第一行：大号百分比 + 细进度条 + 速度/剩余 ----
         top = self._frame(body, "surface")
         top.pack(fill="x")
+
         self.percent_label = self._label(top, "0%", font=self.fonts.big,
                                          width=4, anchor="w")
         self.percent_label.pack(side="left")
+
+        # 8px 细条，上下各留 16，正好贴着 28pt 数字垂直居中
         self.progress = self._register_tint(widgets.ProgressBar(
-            top, palette=palette, fonts=self.fonts, height=20))
-        self.progress.pack(side="left", fill="x", expand=True, padx=(12, 14), pady=(8, 0))
-        self.speed_label = self._label(top, "— KB/s", fg_token="text_dim",
-                                       font=self.fonts.small_bold, width=12, anchor="e")
-        self.speed_label.pack(side="right", pady=(8, 0))
+            top, palette=palette, fonts=self.fonts, height=8, radius=4,
+            show_text=False))
+        self.progress.pack(side="left", fill="x", expand=True,
+                           padx=(16, 20), pady=16)
 
+        # 右对齐两块读数：速度在左、预计剩余在右
+        self.speed_label = self._readout_block(top, "速度", "— KB/s", (0, 20))
+        self.eta_label = self._readout_block(top, "预计剩余", "--", (0, 0))
+
+        # ---- 第二行：四个指标卡，中间 1px 竖线 ----
         bottom = self._frame(body, "surface")
-        bottom.pack(fill="x", pady=(10, 0))
-        self.pill_done = self._register_tint(widgets.Pill(
-            bottom, "完成 0", palette=palette, fonts=self.fonts, dot="success"))
-        self.pill_done.pack(side="left")
-        self.pill_failed = self._register_tint(widgets.Pill(
-            bottom, "失败 0", palette=palette, fonts=self.fonts, dot="danger"))
-        self.pill_failed.pack(side="left", padx=(8, 0))
-        self.pill_skipped = self._register_tint(widgets.Pill(
-            bottom, "跳过 0", palette=palette, fonts=self.fonts, dot="warning"))
-        self.pill_skipped.pack(side="left", padx=(8, 0))
-        self.pill_total = self._register_tint(widgets.Pill(
-            bottom, "总计 0", palette=palette, fonts=self.fonts, dot="info"))
-        self.pill_total.pack(side="left", padx=(8, 0))
+        bottom.pack(fill="x", pady=(16, 0))
 
-        self.eta_label = self._label(bottom, "剩余 --", fg_token="text_dim",
-                                     font=self.fonts.small, anchor="e")
-        self.eta_label.pack(side="right")
+        metrics = (
+            ("pill_done", "完成 0", None),
+            ("pill_failed", "失败 0", "danger"),
+            ("pill_skipped", "跳过 0", None),
+            ("pill_total", "总计 0", None),
+        )
+        for index, (attr, text, warn_token) in enumerate(metrics):
+            if index:
+                self._frame(bottom, "border", width=1).pack(
+                    side="left", fill="y", padx=20)
+            tile = self._register_tint(widgets.MetricTile(
+                bottom, text, palette=palette, fonts=self.fonts,
+                value_token="text", warn_token=warn_token))
+            tile.pack(side="left")
+            setattr(self, attr, tile)
 
     # -- 4. 四页签 -------------------------------------------------------
     def _build_notebook(self):
         self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(side="top", fill="both", expand=True, padx=18, pady=(0, 8))
+        self.notebook.pack(side="top", fill="both", expand=True, padx=16, pady=(0, 12))
 
         self.queue_tab = self._build_queue_tab()
         self.failure_tab = self._build_failure_tab()
@@ -789,7 +822,7 @@ class App(object):
         palette = self.palette
         page = self._frame(self.notebook, "surface")
         wrapper = self._frame(page, "surface")
-        wrapper.pack(fill="both", expand=True, padx=8, pady=8)
+        wrapper.pack(fill="both", expand=True, padx=16, pady=16)
 
         columns = ("name", "size", "progress", "speed", "status", "path")
         headings = {"name": "文件名", "size": "大小", "progress": "进度",
@@ -813,6 +846,21 @@ class App(object):
         wrapper.rowconfigure(0, weight=1)
         wrapper.columnconfigure(0, weight=1)
         self.queue_tree = tree
+
+        # 空状态：和表格同一格居中叠着，有任务时 grid_remove()
+        self.empty_state = self._frame(wrapper, "surface")
+        self.empty_state.grid(row=0, column=0, sticky="")
+        self._label(self.empty_state, "还没有任务", bg_token="surface",
+                    fg_token="text", font=self.fonts.head,
+                    anchor="center").pack(side="top")
+        self._label(self.empty_state,
+                    "在上面粘一个 MediaFire 分享链接，按 Ctrl+Enter",
+                    bg_token="surface", fg_token="text_dim",
+                    font=self.fonts.body, anchor="center").pack(side="top", pady=(8, 0))
+        self._label(self.empty_state, "支持单文件与整个文件夹",
+                    bg_token="surface", fg_token="text_dim",
+                    font=self.fonts.small, anchor="center").pack(side="top", pady=(4, 0))
+        self.empty_state.lift()
         return page
 
     def _build_failure_tab(self):
@@ -820,30 +868,30 @@ class App(object):
         page = self._frame(self.notebook, "surface")
 
         toolbar = self._frame(page, "surface")
-        toolbar.pack(fill="x", padx=10, pady=(10, 6))
+        toolbar.pack(fill="x", padx=16, pady=(16, 12))
         self.retry_btn = self._register_tint(widgets.RoundedButton(
             toolbar, "重试全部失败", command=self._on_retry_all, kind="primary",
-            palette=palette, fonts=self.fonts, height=30, min_width=120))
+            palette=palette, fonts=self.fonts, height=34, min_width=128))
         self.retry_btn.pack(side="left")
         self.copy_btn = self._register_tint(widgets.RoundedButton(
             toolbar, "复制失败链接", command=self._on_copy_failures, kind="ghost",
-            palette=palette, fonts=self.fonts, height=30))
+            palette=palette, fonts=self.fonts, height=34))
         self.copy_btn.pack(side="left", padx=(8, 0))
         self.export_json_btn = self._register_tint(widgets.RoundedButton(
             toolbar, "导出 JSON", command=self._on_export_failures_json, kind="ghost",
-            palette=palette, fonts=self.fonts, height=30))
+            palette=palette, fonts=self.fonts, height=34))
         self.export_json_btn.pack(side="left", padx=(8, 0))
         self.export_md_btn = self._register_tint(widgets.RoundedButton(
             toolbar, "导出 Markdown", command=self._on_export_failures_markdown,
-            kind="ghost", palette=palette, fonts=self.fonts, height=30))
+            kind="ghost", palette=palette, fonts=self.fonts, height=34))
         self.export_md_btn.pack(side="left", padx=(8, 0))
         self.clear_btn = self._register_tint(widgets.RoundedButton(
             toolbar, "清空", command=self._on_clear_failures, kind="subtle",
-            palette=palette, fonts=self.fonts, height=30, min_width=64))
+            palette=palette, fonts=self.fonts, height=34, min_width=72))
         self.clear_btn.pack(side="right")
 
         wrapper = self._frame(page, "surface")
-        wrapper.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        wrapper.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
         columns = ("name", "kind", "reason", "attempts", "time")
         headings = {"name": "文件名", "kind": "错误类型", "reason": "原因",
@@ -874,7 +922,7 @@ class App(object):
         palette = self.palette
         page = self._frame(self.notebook, "surface")
         wrapper = self._frame(page, "surface")
-        wrapper.pack(fill="both", expand=True, padx=8, pady=8)
+        wrapper.pack(fill="both", expand=True, padx=16, pady=16)
 
         text = tk.Text(wrapper, wrap="none", relief="flat", bd=0,
                        highlightthickness=1,
@@ -882,7 +930,8 @@ class App(object):
                        insertbackground=palette["text"],
                        selectbackground=palette["selection"],
                        selectforeground=palette["text"],
-                       font=self.fonts.mono, padx=10, pady=8)
+                       font=self.fonts.mono, padx=12, pady=10,
+                       spacing1=2, spacing2=0, spacing3=2)
         scroll = ttk.Scrollbar(wrapper, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=scroll.set, state="disabled")
         text.grid(row=0, column=0, sticky="nsew")
@@ -897,22 +946,22 @@ class App(object):
         page = self._frame(self.notebook, "surface")
 
         toolbar = self._frame(page, "surface")
-        toolbar.pack(fill="x", padx=10, pady=(10, 6))
+        toolbar.pack(fill="x", padx=16, pady=(16, 12))
         self.diag_export_btn = self._register_tint(widgets.RoundedButton(
             toolbar, "导出诊断报告", command=self._on_export_diagnostics, kind="primary",
-            palette=self.palette, fonts=self.fonts, height=30, min_width=128))
+            palette=self.palette, fonts=self.fonts, height=34, min_width=136))
         self.diag_export_btn.pack(side="left")
         self.diag_refresh_btn = self._register_tint(widgets.RoundedButton(
             toolbar, "重新采集", command=self._refresh_diagnostics, kind="ghost",
-            palette=self.palette, fonts=self.fonts, height=30))
+            palette=self.palette, fonts=self.fonts, height=34))
         self.diag_refresh_btn.pack(side="left", padx=(8, 0))
         self.diag_hint = self._label(
             toolbar, "按系统与错误类型交叉归集，反馈问题时请附上这份报告",
             fg_token="text_dim", font=self.fonts.small, anchor="e")
-        self.diag_hint.pack(side="right", pady=(6, 0))
+        self.diag_hint.pack(side="right", pady=(8, 0))
 
         panes = self._frame(page, "surface")
-        panes.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        panes.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         panes.rowconfigure(0, weight=3)
         panes.rowconfigure(1, weight=2)
         panes.columnconfigure(0, weight=1)
@@ -934,7 +983,7 @@ class App(object):
         self.env_tree = env_tree
 
         stat_wrap = self._frame(panes, "surface")
-        stat_wrap.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        stat_wrap.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
         stat_tree = ttk.Treeview(stat_wrap, columns=("category", "label", "count"),
                                  show="headings", selectmode="browse")
         stat_tree.heading("category", text="分类维度", anchor="w")
@@ -960,7 +1009,7 @@ class App(object):
         bar.pack_propagate(False)
 
         inner = self._frame(bar, "surface_alt")
-        inner.pack(fill="both", expand=True, padx=14)
+        inner.pack(fill="both", expand=True, padx=16)
 
         self.status_dot = self._register_tint(widgets.StatusDot(
             inner, palette=palette, size=12, state="idle"))
@@ -972,7 +1021,7 @@ class App(object):
 
         self.open_dir_btn = self._register_tint(widgets.RoundedButton(
             inner, "打开下载目录", command=self._open_dir, kind="subtle",
-            palette=palette, fonts=self.fonts, height=24, pad_x=10))
+            palette=palette, fonts=self.fonts, height=26, pad_x=10))
         self.open_dir_btn.pack(side="right", pady=4)
 
         version_text = "v%s · %s" % (self.kernel.VERSION, theme.dpi_note())
@@ -1011,6 +1060,11 @@ class App(object):
                     tree.tag_configure(status, foreground=palette[token])
                 except tk.TclError:
                     pass
+            # 斑马纹：只换底色不改字色，行高亮交给选中态
+            try:
+                tree.tag_configure("zebra", background=palette["row_alt"])
+            except tk.TclError:
+                pass
         for tree in (getattr(self, "env_tree", None), getattr(self, "stat_tree", None)):
             if tree is None:
                 continue
@@ -1032,7 +1086,8 @@ class App(object):
                            highlightbackground=palette["border"])
         except tk.TclError:
             pass
-        for level, token in (("info", "info"), ("warn", "warning"),
+        # INFO 降一档到 text_dim：日志里真正该跳出来的是 OK / WARN / ERROR
+        for level, token in (("info", "text_dim"), ("warn", "warning"),
                              ("error", "danger"), ("ok", "success"),
                              ("dim", "text_dim")):
             try:
@@ -1395,6 +1450,8 @@ class App(object):
         self._task_rows = {}
         for index, task in enumerate(self._tasks):
             self._insert_task_row(task, index)
+        self._restripe_queue()
+        self._update_empty_state()
         self._set_busy(False)
         self.start_btn.set_enabled(bool(self._tasks))
         self.pause_btn.set_enabled(False)
@@ -1407,8 +1464,22 @@ class App(object):
         self._log("OK 解析完成：%s（来自 %s）" % (summary, url))
         if skipped:
             self._log("INFO 其中 %d 个文件历史已下载过，已标记为跳过" % skipped)
-        self._set_status("已加入队列：%s，点「开始下载」开始" % summary, "success")
+        self._set_status("已加入队列：%s" % summary, "success")
         self._apply_stats(self._local_stats())
+
+        # 解析完直接开始，省掉"再点一次"（用户 2026-11-02 明确要求）。
+        # 用 after 让界面先把队列行画出来再启动，否则用户会觉得"点了没反应"。
+        if self._tasks and self.autostart_var.get():
+            self._log("INFO 解析完成，按设置自动开始下载")
+            self.root.after(150, self._autostart_fire)
+
+    def _autostart_fire(self):
+        """自动开始的延时入口：这一轮里用户可能已经手动点了开始或改了设置。"""
+        if not self.autostart_var.get():
+            return
+        if self._running or self._busy:
+            return
+        self._on_start()
 
     # ------------------------------------------------------------------
     # 3.9 队列表格
@@ -1422,14 +1493,71 @@ class App(object):
         except tk.TclError:
             pass
 
+    def _restripe_queue(self):
+        """按当前行序重排斑马纹 tag，保证删行之后还是一深一浅。"""
+        try:
+            children = self.queue_tree.get_children("")
+            striped = set(self.queue_tree.tag_has("zebra"))
+        except tk.TclError:
+            return
+        for index, iid in enumerate(children):
+            want = (index % 2) == 1
+            if want == (iid in striped):
+                continue
+            tags = [t for t in self._queue_tags(iid) if t != "zebra"]
+            if want:
+                tags.append("zebra")
+            try:
+                self.queue_tree.item(iid, tags=tuple(tags))
+            except tk.TclError:
+                pass
+
+    def _queue_tags(self, iid):
+        """读某一行的 tag 列表；Tk 版本差异下 item(...,'tags') 可能回字符串。"""
+        try:
+            raw = self.queue_tree.item(iid, "tags")
+        except tk.TclError:
+            return []
+        if not raw:
+            return []
+        if isinstance(raw, str):
+            return [part for part in raw.replace("(", "").replace(")", "")
+                    .replace(",", " ").split() if part]
+        return [str(part) for part in raw]
+
+    def _update_empty_state(self):
+        """队列空了就把三行引导摆出来，有任务就收掉。"""
+        empty = getattr(self, "empty_state", None)
+        if empty is None:
+            return
+        try:
+            has_rows = bool(self.queue_tree.get_children(""))
+        except tk.TclError:
+            return
+        try:
+            if has_rows:
+                empty.grid_remove()
+            else:
+                empty.grid()
+                empty.lift()
+        except tk.TclError:
+            pass
+
     def _insert_task_row(self, task, index):
         values = self._task_row_values(task)
-        tags = (str(getattr(task, "status", "waiting") or "waiting"),)
+        tags = [str(getattr(task, "status", "waiting") or "waiting")]
         try:
-            iid = self.queue_tree.insert("", "end", values=values, tags=tags)
+            existing = len(self.queue_tree.get_children(""))
+        except tk.TclError:
+            existing = 0
+        if existing % 2:
+            tags.append("zebra")
+        try:
+            iid = self.queue_tree.insert("", "end", values=values, tags=tuple(tags))
         except tk.TclError:
             return None
         self._task_rows[id(task)] = iid
+        self._update_empty_state()
         return iid
 
     def _upsert_task_row(self, task):
@@ -1437,11 +1565,16 @@ class App(object):
             return
         key = id(task)
         values = self._task_row_values(task)
-        tags = (str(getattr(task, "status", "waiting") or "waiting"),)
+        tags = [str(getattr(task, "status", "waiting") or "waiting")]
         iid = self._task_rows.get(key)
         try:
             if iid and self.queue_tree.exists(iid):
-                self.queue_tree.item(iid, values=values, tags=tags)
+                try:
+                    if iid in set(self.queue_tree.tag_has("zebra")):
+                        tags.append("zebra")
+                except tk.TclError:
+                    pass
+                self.queue_tree.item(iid, values=values, tags=tuple(tags))
             else:
                 self._insert_task_row(task, len(self._task_rows))
                 if task not in self._tasks:
@@ -1541,10 +1674,12 @@ class App(object):
                 self.pause_btn.set_text("继续" if paused else "暂停")
                 self.status_dot.set_state("warn" if paused else "busy")
         self._update_failure_badge()
+        self._update_empty_state()
 
     def _eta_text(self, speed):
+        # 只回数值本身，前缀由旁边的「预计剩余」小标签负责，避免重复两个字
         if speed <= 0.05:
-            return "剩余 --"
+            return "--"
         remaining = 0
         for task in self._tasks:
             status = str(getattr(task, "status", "") or "")
@@ -1554,8 +1689,8 @@ class App(object):
             done = getattr(task, "downloaded", 0) or 0
             remaining += max(0, int(size) - int(done))
         if remaining <= 0:
-            return "剩余 --"
-        return "剩余 " + _fmt_seconds(remaining / (speed * 1024.0))
+            return "--"
+        return _fmt_seconds(remaining / (speed * 1024.0))
 
     # ------------------------------------------------------------------
     # 3.11 下载控制
@@ -1587,6 +1722,7 @@ class App(object):
 
     def _on_start(self):
         if self._busy:
+            self._set_status("正在解析链接，稍等一下再点开始", "warning")
             return
         if not self._tasks:
             self._set_status("队列是空的，先解析一个链接", "warning")
@@ -1594,11 +1730,19 @@ class App(object):
         if self.downloader is None:
             self._set_status("下载引擎还没有建立，请重新解析链接", "warning")
             return
+        # 保存位置可能已经被用户改过，而引擎记的还是解析那一刻的目录。
+        # 不同步的话，用户看到的是「我换了地方，它偏说没有写入权限」。
+        try:
+            self.downloader.set_download_dir(self._entry_text(self.dir_entry))
+        except Exception:
+            self._log("WARN 切换保存位置时出错：%s" % traceback.format_exc(limit=1))
         try:
             started = bool(self.downloader.start())
         except Exception:
-            self._log("ERROR 启动下载失败：%s" % traceback.format_exc(limit=2))
+            detail = traceback.format_exc(limit=3)
+            self._log("ERROR 启动下载失败：%s" % detail)
             self._set_status("启动下载失败，详情见日志", "danger")
+            self._alert_start_failed("启动下载时出现意外错误。", detail)
             return
         if not started:
             # 启动失败可能有很多原因（目录不可写最常见），引擎会把真正的
@@ -1606,6 +1750,7 @@ class App(object):
             last_error = str(getattr(self.downloader, "last_error", "") or "")
             if last_error:
                 self._set_status(last_error.splitlines()[0], "danger")
+                self._alert_start_failed(last_error.splitlines()[0], last_error)
                 return
             running = False
             try:
@@ -1616,6 +1761,10 @@ class App(object):
                 self._set_status("下载已经在进行中", "warning")
             else:
                 self._set_status("没有可下载的任务（可能全部已完成或已跳过）", "warning")
+                self._alert_start_failed(
+                    "没有可下载的任务。",
+                    "队列里的文件要么已经下完、要么被记为已存在。\n"
+                    "如果是失败的，去「失败清单」点「重试全部失败」。")
             return
         self._running = True
         self._paused = False
@@ -1630,6 +1779,27 @@ class App(object):
                   % (len(self._tasks), int(self.threads_spin.get() or 2),
                      float(self.gap_spin.get() or 1.0)))
         self._schedule_tick()
+
+    def _alert_start_failed(self, title_text, detail):
+        """启动失败必须弹出来。
+
+        2.0.2 的教训：只往状态栏写一行红字，用户盯着进度条根本不会看，
+        事后总结就是"点了没反应"。所以这里强制弹窗，并且把下一步该做什么
+        一并写清楚——只说"失败"不说"怎么办"等于没说。
+        """
+        message = str(detail or title_text or "").strip()
+        hint = ""
+        if any(word in message for word in ("无法写入", "写入权限", "只读", "权限")):
+            hint = ("\n\n怎么处理：\n"
+                    "1. 点「浏览」换一个文件夹——桌面、或用户目录下任意位置都可以\n"
+                    "2. 也可以换成 D:\\MediaFireDownloads 这种刚建的空目录\n"
+                    "3. 换好之后直接点「开始下载」，不用重新解析链接")
+        if not self._is_viewable():
+            return
+        try:
+            messagebox.showerror("无法开始下载", message + hint, parent=self.root)
+        except tk.TclError:
+            pass
 
     def _on_pause_toggle(self):
         if self.downloader is None or not self._running:
@@ -1711,11 +1881,13 @@ class App(object):
         self.status_dot.set_state("online")
 
         counts = (stats or {}).get("counts") or {}
-        summary = ("完成 %s · 失败 %s · 跳过 %s · 总计 %s"
-                   % (counts.get("done", 0), counts.get("failed", 0),
-                      counts.get("skipped", 0), (stats or {}).get("total", 0)))
+        done = int(counts.get("done", 0) or 0)
+        failed = int(counts.get("failed", 0) or 0)
+        skipped = int(counts.get("skipped", 0) or 0)
+        total = int((stats or {}).get("total", 0) or 0)
+        summary = "完成 %s · 失败 %s · 跳过 %s · 总计 %s" % (done, failed, skipped, total)
         self._log("OK 下载结束：%s" % summary)
-        self._set_status("下载结束：%s" % summary, "success")
+        self._set_status("下载结束：%s" % summary, "success" if not failed else "warning")
         self._refresh_failures()
 
         if self._background:
@@ -1725,8 +1897,21 @@ class App(object):
                 self.root.lift()
             except tk.TclError:
                 pass
-        if self._is_viewable():
-            messagebox.showinfo("下载结束", summary, parent=self.root)
+        if not self._is_viewable():
+            return
+        try:
+            if failed:
+                messagebox.showwarning(
+                    "下载结束，有失败项",
+                    summary + "\n\n去「失败清单」页签看看原因。"
+                              "修好之后点「重试全部失败」，只会补失败的那几个。",
+                    parent=self.root)
+            elif done == 0 and skipped == 0:
+                messagebox.showinfo("已停止", summary + "\n\n本轮没有任何文件完成。", parent=self.root)
+            else:
+                messagebox.showinfo("下载结束", summary, parent=self.root)
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------
     # 3.12 失败清单

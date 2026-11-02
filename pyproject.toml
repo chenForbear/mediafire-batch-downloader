@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mediafire-batch-downloader"
-version = "2.0.2"
+version = "2.0.3"
 description = "MediaFire 文件夹批量解析与下载工具：失败清单、断点续传、SHA-256 校验、兼容性诊断报告"
 readme = { file = "README.zh-CN.md", content-type = "text/markdown" }
 requires-python = ">=3.8"

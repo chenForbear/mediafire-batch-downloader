@@ -100,3 +100,8 @@ build-temp-dir/
 # 调试用的临时裁剪图/截图，绝不上传
 .crop-*.png
 *.crop.png
+
+# 本地调试残留（不进仓库）
+_repro.py
+build-log-*.txt
+step*.log

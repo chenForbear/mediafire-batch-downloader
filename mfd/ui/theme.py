@@ -118,6 +118,12 @@ def _derive(base):
 
     合同只规定了 12 个主色，剩下的（按压态、表头、选中行、日志底…）一律
     由主色调出来，保证深浅两套皮肤的字面量都只出现在本文件里。
+
+    2.0.3 视觉调整的三个口径（都是「更克制」）：
+
+    * ``row_alt`` 淡到几乎看不出，只在不经意间分出隔行；
+    * ``selection`` 用 accent 与 surface 的低比例混合，避免整行荧光；
+    * ``disabled_text`` 往背景再退一步，让置灰真的像置灰。
     """
     palette = dict(base)
     palette["on_accent"] = _WHITE                     # 主色块上的文字
@@ -127,12 +133,15 @@ def _derive(base):
     palette["surface_hi"] = mix(base["surface"], base["text"], 0.07)      # 悬停面
     palette["surface_low"] = mix(base["surface"], base["bg"], 0.55)       # 内嵌面
     palette["border_soft"] = mix(base["border"], base["surface"], 0.55)
-    palette["selection"] = mix(base["surface"], base["accent"], 0.30)     # 表格选中行
-    palette["row_alt"] = mix(base["surface"], base["surface_alt"], 0.55)  # 斑马纹
+    palette["divider"] = mix(base["border"], base["surface"], 0.35)       # 卡内细分割
+    palette["selection"] = mix(base["surface"], base["accent"], 0.22)     # 表格选中行
+    palette["row_alt"] = mix(base["surface"], base["surface_alt"], 0.28)  # 斑马纹（克制）
     palette["track"] = base["surface_alt"]                                # 进度条轨道
     palette["disabled_fill"] = mix(base["surface"], base["surface_alt"], 0.65)
-    palette["disabled_text"] = mix(base["text_dim"], base["surface"], 0.55)
+    palette["disabled_text"] = mix(base["text_dim"], base["surface"], 0.68)
+    palette["ghost_hover"] = base["surface_alt"]                          # ghost 悬停底
     palette["focus_ring"] = base["accent"]
+    palette["progress_gloss"] = mix(base["accent"], _WHITE, 0.34)         # 进度条顶部高光
     palette["log_bg"] = mix(base["bg"], base["surface"], 0.45)            # 日志深色块
     palette["scrollbar"] = mix(base["border"], base["text_dim"], 0.30)
     palette["scrollbar_hover"] = mix(base["border"], base["text_dim"], 0.60)
@@ -192,16 +201,21 @@ class Fonts(object):
     def __init__(self, root, family, mono_family):
         self.family = family
         self.mono_family = mono_family
-        # 单位是磅：Windows 96 DPI 下 10 磅约等于 13 像素，正文字号按合同「10」
-        self.title = tkfont.Font(root=root, family=family, size=16, weight="bold")
+        # 单位是磅：Windows 96 DPI 下 10 磅约等于 13 像素
+        self.title = tkfont.Font(root=root, family=family, size=15, weight="bold")
         self.head = tkfont.Font(root=root, family=family, size=13, weight="bold")
         self.body = tkfont.Font(root=root, family=family, size=10)
         self.body_bold = tkfont.Font(root=root, family=family, size=10, weight="bold")
         self.small = tkfont.Font(root=root, family=family, size=9)
         self.small_bold = tkfont.Font(root=root, family=family, size=9, weight="bold")
-        self.big = tkfont.Font(root=root, family=family, size=30, weight="bold")
+        # 2.0.3 新增：胶囊标签用 8 磅、指标卡数字 15 磅、小块数值 11 磅
+        self.tiny = tkfont.Font(root=root, family=family, size=8)
+        self.tiny_bold = tkfont.Font(root=root, family=family, size=8, weight="bold")
+        self.metric = tkfont.Font(root=root, family=family, size=15, weight="bold")
+        self.value = tkfont.Font(root=root, family=family, size=11)
+        self.big = tkfont.Font(root=root, family=family, size=28, weight="bold")
         self.mono = tkfont.Font(root=root, family=mono_family, size=10)
-        self.table = tkfont.Font(root=root, family=family, size=10)
+        self.table = tkfont.Font(root=root, family=family, size=11)
 
     def line_height(self, font=None):
         """某字体的行高（像素），用于 Treeview 行高与文本区边距。"""
@@ -270,28 +284,33 @@ def _style_scrollbar(style, palette):
             style.configure(
                 "%s.TScrollbar" % orient,
                 background=palette["scrollbar"],
-                troughcolor=palette["bg"],
-                bordercolor=palette["bg"],
+                troughcolor=palette["surface"],
+                bordercolor=palette["surface"],
                 lightcolor=palette["scrollbar"],
                 darkcolor=palette["scrollbar"],
                 arrowcolor=palette["text_dim"],
                 gripcount=0,
                 arrowsize=0,
-                borderwidth=0,
+                borderwidth=2,
                 relief="flat",
                 width=10,
             )
             style.map(
                 "%s.TScrollbar" % orient,
-                background=[("pressed", palette["text_dim"]),
+                background=[("pressed", palette["accent"]),
                             ("active", palette["scrollbar_hover"])],
+                lightcolor=[("pressed", palette["accent"]),
+                            ("active", palette["scrollbar_hover"])],
+                darkcolor=[("pressed", palette["accent"]),
+                           ("active", palette["scrollbar_hover"])],
             )
         except tk.TclError:
             pass
 
 
 def _style_treeview(style, palette, fonts):
-    row_height = fonts.line_height(fonts.table) + 10
+    # 2.0.3：行高从 22 抬到 28（最小 28，11 磅字再加 8 也不会被压）
+    row_height = max(28, fonts.line_height(fonts.table) + 2)
     try:
         # 去掉 clam 给 Treeview 画的外框，只留内容区，视觉上才是「卡片里的表」
         style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
@@ -313,13 +332,18 @@ def _style_treeview(style, palette, fonts):
             background=[("selected", palette["selection"])],
             foreground=[("selected", palette["text"])],
         )
+        # 表头：底部那条 1px 分隔线靠 bordercolor + borderwidth 画出来，
+        # 比额外塞一个 Frame 稳（Treeview 的 heading 本身就在最上层）
         style.configure(
             "Treeview.Heading",
             background=palette["surface_alt"],
             foreground=palette["text_dim"],
+            bordercolor=palette["border"],
+            lightcolor=palette["surface_alt"],
+            darkcolor=palette["surface_alt"],
             relief="flat",
-            borderwidth=0,
-            padding=(10, 8),
+            borderwidth=1,
+            padding=(12, 9),
             font=fonts.small_bold,
         )
         style.map(
@@ -333,12 +357,18 @@ def _style_treeview(style, palette, fonts):
 
 
 def _style_notebook(style, palette, fonts):
+    """页签：未选中是沉下去的次要文字，选中是 surface 底 + 底部 accent 下划条。
+
+    clam 的 ``Notebook.tab`` 元素用 ``lightcolor`` 画上/左亮边、``darkcolor``
+    画下/右暗边，所以把选中态的 ``darkcolor`` 设成 accent，视觉上就是一条
+    贴着页签底边的 2px 强调线，不用自己再摆一个 Canvas 指示器。
+    """
     try:
         style.configure(
             "TNotebook",
             background=palette["bg"],
             borderwidth=0,
-            tabmargins=(0, 4, 0, 0),
+            tabmargins=(0, 6, 0, 0),
             padding=0,
         )
         style.configure(
@@ -348,17 +378,22 @@ def _style_notebook(style, palette, fonts):
             borderwidth=0,
             padding=(18, 9),
             font=fonts.body_bold,
-            lightcolor=palette["surface_alt"],
-            darkcolor=palette["surface_alt"],
+            lightcolor=palette["bg"],
+            darkcolor=palette["bg"],
         )
         style.map(
             "TNotebook.Tab",
+            # clam 默认会把选中态的 padding 缩到 (6,4,6,2)，切页签时文字会跳一下，
+            # 这里显式钉死成和未选中一样的值。
+            padding=[("selected", (18, 9)), ("active", (18, 9))],
             background=[("selected", palette["surface"]),
                         ("active", palette["surface_alt"])],
             foreground=[("selected", palette["text"]),
                         ("active", palette["text"])],
-            lightcolor=[("selected", palette["surface"])],
-            darkcolor=[("selected", palette["surface"])],
+            lightcolor=[("selected", palette["surface"]),
+                        ("active", palette["surface_alt"])],
+            darkcolor=[("selected", palette["accent"]),
+                       ("active", palette["surface_alt"])],
         )
     except tk.TclError:
         pass
