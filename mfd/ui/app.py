@@ -1601,6 +1601,12 @@ class App(object):
             self._set_status("启动下载失败，详情见日志", "danger")
             return
         if not started:
+            # 启动失败可能有很多原因（目录不可写最常见），引擎会把真正的
+            # 那句原因放在 last_error 里，直接显示比"没有可下载的任务"有用
+            last_error = str(getattr(self.downloader, "last_error", "") or "")
+            if last_error:
+                self._set_status(last_error.splitlines()[0], "danger")
+                return
             running = False
             try:
                 running = bool(getattr(self.downloader, "is_running", False))

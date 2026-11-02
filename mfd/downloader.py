@@ -26,7 +26,14 @@ import traceback
 from . import mediafire
 from .failures import FailureBook, classify_failure
 from .storage import History
-from .util import fit_in_directory, human_size, human_time, sanitize_filename
+from .util import (
+    describe_write_error,
+    fit_in_directory,
+    human_size,
+    human_time,
+    probe_writable_dir,
+    sanitize_filename,
+)
 
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 PART_SUFFIX = ".part"
@@ -151,6 +158,11 @@ class Downloader(object):
         self._total_downloaded = 0
         self._started_at = 0.0
         self._run_token = 0
+        # 目录可写性探测结果缓存：{目录: (ok, reason)}，避免每个文件都写一次探测
+        self._writable_cache = {}
+        # 最近一次"启动失败"的原因，供界面直接显示（否则用户只会看到
+        # "没有可下载的任务"，完全猜不到其实是保存目录写不进去）
+        self.last_error = ""
 
     # ------------------------------------------------------------------
     # 对外状态
@@ -281,10 +293,17 @@ class Downloader(object):
             self._emit("finished", self.stats())
             return False
 
-        try:
-            os.makedirs(self.download_dir, exist_ok=True)
-        except OSError as exc:
-            self._log("无法创建下载目录 %s：%s" % (self.download_dir, exc))
+        # 开始前先确认保存目录真的能写（makedirs 在"目录已存在但只读"时不报错，
+        # 结果要等到 open(.part) 才炸，错误信息里只有一串路径，用户无从下手）
+        self.last_error = ""
+        writable, reason = probe_writable_dir(self.download_dir)
+        if not writable:
+            self.last_error = "保存目录无法写入：%s\n%s" % (reason, self.download_dir)
+            self._log("保存目录无法写入：%s" % reason)
+            self._log("    目录：%s" % self.download_dir)
+            self._log("    请在界面上换一个文件夹再开始（例如 %s）"
+                      % os.path.join(os.path.expanduser("~"), "Downloads"))
+            self._writable_cache[self.download_dir] = (False, reason)
             self._emit("finished", self.stats())
             return False
 
@@ -479,6 +498,21 @@ class Downloader(object):
                            detail=repr(exc), exc=exc)
                 return
 
+        # 子目录也要确认能写：makedirs 对"已存在但只读"的目录不报错，
+        # 否则要等到 open(.part) 才炸，报出来的只有一串路径
+        cached = self._writable_cache.get(target_dir)
+        if cached is None:
+            cached = probe_writable_dir(target_dir)
+            self._writable_cache[target_dir] = cached
+        if not cached[0]:
+            self._fail(task, "保存位置无法写入：%s" % cached[1],
+                       detail="目录：%s" % target_dir)
+            # 目录不可写时后面每个文件都会以同样理由失败，继续跑只会刷满失败清单
+            self.last_error = "保存位置无法写入：%s\n%s" % (cached[1], target_dir)
+            self._log("保存目录不可写，已停止队列。换一个文件夹后点「重试全部失败」即可。")
+            self._stop_flag.set()
+            return
+
         final_path, final_name = fit_in_directory(target_dir, task.name)
         part_path = final_path + PART_SUFFIX
 
@@ -537,7 +571,7 @@ class Downloader(object):
                 last_detail = exc.detail
                 last_exc = exc
             except OSError as exc:
-                last_error = "写入文件失败：%s" % exc
+                last_error = describe_write_error(part_path, exc)
                 last_detail = "OSError: %r" % (exc,)
                 last_exc = exc
             except Exception as exc:

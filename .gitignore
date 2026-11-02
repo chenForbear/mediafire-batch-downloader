@@ -96,3 +96,7 @@ desktop.ini
 
 dist-dir/
 build-temp-dir/
+
+# 调试用的临时裁剪图/截图，绝不上传
+.crop-*.png
+*.crop.png

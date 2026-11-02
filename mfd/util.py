@@ -165,3 +165,80 @@ def normalize_spaces(text):
         # U+3000 全角空格、U+00A0 不换行空格
         text = text.replace("\u3000", " ").replace("\u00a0", " ")
     return text.strip()
+
+
+def probe_writable_dir(directory):
+    """检查一个目录是否真的能写文件，返回 ``(ok, reason)``。
+
+    ``reason`` 是给人看的中文句子，可直接显示在失败清单里。
+
+    为什么需要这一步（实测取证，2026-11-02）：
+      ``os.makedirs(..., exist_ok=True)`` 在"目录已存在但没有写入权限"
+      时**不会报错**，它会安静地返回——于是程序以为目录可用，直到真正
+      ``open(part_path, "wb")`` 才抛 ``[Errno 13] Permission denied``。
+      那时错误信息里只有一长串路径，用户看不出到底是"没权限"还是
+      "文件被占用"，只能干瞪眼。写一个探测文件就能把这两种情况区分开。
+    """
+    if not directory:
+        return False, "保存目录为空"
+
+    try:
+        if not os.path.isdir(directory):
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except PermissionError:
+                return False, "目录不存在且没有权限创建（检查上级文件夹是否只读）"
+            except OSError as exc:
+                return False, "目录不存在且创建失败：%s" % exc
+        if not os.path.isdir(directory):
+            return False, "路径已存在但不是文件夹"
+
+        probe = os.path.join(directory, ".mfd_write_probe_%d.tmp" % os.getpid())
+        try:
+            handle = open(probe, "wb")
+            try:
+                handle.write(b"mfd")
+            finally:
+                handle.close()
+        except PermissionError:
+            return False, "没有写入权限（可能被杀毒软件锁定，或文件夹是只读的）"
+        except OSError as exc:
+            return False, "写入测试失败：%s" % exc
+        finally:
+            try:
+                os.remove(probe)
+            except OSError:
+                pass
+
+        return True, ""
+    except Exception as exc:  # 兜底：探测本身不能把程序搞崩
+        return False, "目录检查异常：%s" % exc
+
+
+def describe_write_error(path, exc):
+    """把写入失败的异常翻译成一句能直接照做的话。"""
+    directory = os.path.dirname(path) or "."
+    name = os.path.basename(path)
+
+    if isinstance(exc, PermissionError):
+        ok, reason = probe_writable_dir(directory)
+        if not ok:
+            return "写不进%s：%s" % (directory, reason)
+        if os.path.isdir(path):
+            return "同名文件夹已存在，无法写入同名文件：%s" % name
+        return ("文件夹可写，但这个名字被系统拒绝（多半是同名文件正被其他程序占用）：%s"
+                % name)
+
+    if isinstance(exc, FileNotFoundError):
+        return "保存目录不存在：%s" % directory
+
+    if isinstance(exc, OSError):
+        code = getattr(exc, "errno", None)
+        if code == 28:                      # ENOSPC，两平台一致
+            return "磁盘空间不足"
+        if code in (36, 38):               # ENAMETOOLONG：Linux 36 / Windows 38
+            return "文件名太长，超出系统限制"
+        return "写入失败：%s" % exc
+
+    return "写入失败：%s" % exc
+
